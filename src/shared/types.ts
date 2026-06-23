@@ -104,4 +104,5 @@ export interface RendererApi {
   checkForUpdates(): Promise<UpdateStatus>;
   downloadUpdate(): Promise<UpdateStatus>;
   applyUpdate(): Promise<UpdateStatus>;
+  onInventoryChanged(callback: (document: InventoryDocument) => void): () => void;
 }

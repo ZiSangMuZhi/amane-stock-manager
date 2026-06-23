@@ -81,7 +81,10 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.5'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.7'));
+    return window.amaneStock.onInventoryChanged((next) => {
+      setDocument(next);
+    });
   }, []);
 
   useEffect(() => {
@@ -150,11 +153,16 @@ function App(): JSX.Element {
       return;
     }
 
-    await runAction(() => window.amaneStock.submitBarcode(value, mode), (result) => {
-      setDocument(result.document);
-      setBarcode('');
-      setNotice({ type: result.ok ? 'success' : 'warning', text: result.message });
-    });
+    setBarcode('');
+    barcodeInputRef.current?.focus();
+    void window.amaneStock
+      .submitBarcode(value, mode)
+      .then((result) => {
+        setDocument(result.document);
+        setNotice({ type: result.ok ? 'success' : 'warning', text: result.message });
+      })
+      .catch(showError)
+      .finally(() => barcodeInputRef.current?.focus());
   }
 
   async function handleRename(): Promise<void> {
@@ -263,7 +271,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.5'}</span>
+            <span>{version ? `v${version}` : 'v0.1.7'}</span>
           </div>
         </div>
 
@@ -694,11 +702,19 @@ function noticeIcon(type: Notice['type']): JSX.Element {
 
 function sortItems(items: InventoryItem[]): InventoryItem[] {
   return [...items].sort((a, b) => {
+    const recentOperationDiff = recentOperationTime(b) - recentOperationTime(a);
+    if (recentOperationDiff !== 0) {
+      return recentOperationDiff;
+    }
     if (b.quantityOnHand !== a.quantityOnHand) {
       return b.quantityOnHand - a.quantityOnHand;
     }
     return a.barcode.localeCompare(b.barcode);
   });
+}
+
+function recentOperationTime(item: InventoryItem): number {
+  return Math.max(Date.parse(item.lastInAt ?? '') || 0, Date.parse(item.lastOutAt ?? '') || 0);
 }
 
 function formatTime(value: string | null): string {

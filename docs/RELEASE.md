@@ -4,7 +4,7 @@
 
 ```powershell
 npm install
-npm run velopack:pack -- -Version 0.1.5
+npm run velopack:pack -- -Version 0.1.7
 ```
 
 This creates Velopack output in `Releases/`, including `Setup.exe`, full update packages, release indexes, and portable output when supported by Velopack.
@@ -12,7 +12,7 @@ This creates Velopack output in `Releases/`, including `Setup.exe`, full update 
 For local rebuilds of the same version, clean generated release output first:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.5 -CleanOutput
+npm run velopack:pack -- -Version 0.1.7 -CleanOutput
 ```
 
 ## Updates
@@ -20,7 +20,7 @@ npm run velopack:pack -- -Version 0.1.5 -CleanOutput
 Build with an HTTPS update feed:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.5 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
+npm run velopack:pack -- -Version 0.1.7 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
 ```
 
 When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. `-PublishGitHub` uploads the generated Velopack assets to a published GitHub Release.
@@ -55,11 +55,11 @@ msiexec /i AmaneStockManager.msi VELOPACK_INSTALLDIR="D:\Apps\Amane Stock Manage
 To also generate an MSI:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.5 -Msi
+npm run velopack:pack -- -Version 0.1.7 -Msi
 ```
 
 The MSI default scope is `PerUser`. To change it at package time:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.5 -Msi -InstallScope PerMachine
+npm run velopack:pack -- -Version 0.1.7 -Msi -InstallScope PerMachine
 ```

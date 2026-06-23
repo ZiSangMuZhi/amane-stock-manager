@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { CurrencyCode, ExportFormat, InventoryMode, RendererApi } from '../shared/types';
+import { CurrencyCode, ExportFormat, InventoryDocument, InventoryMode, RendererApi } from '../shared/types';
 
 const api: RendererApi = {
   getCurrentInventory: () => ipcRenderer.invoke('inventory:get-current'),
@@ -16,7 +16,12 @@ const api: RendererApi = {
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   checkForUpdates: () => ipcRenderer.invoke('app:check-updates'),
   downloadUpdate: () => ipcRenderer.invoke('app:download-update'),
-  applyUpdate: () => ipcRenderer.invoke('app:apply-update')
+  applyUpdate: () => ipcRenderer.invoke('app:apply-update'),
+  onInventoryChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, document: InventoryDocument) => callback(document);
+    ipcRenderer.on('inventory:changed', listener);
+    return () => ipcRenderer.removeListener('inventory:changed', listener);
+  }
 };
 
 contextBridge.exposeInMainWorld('amaneStock', api);

@@ -35,6 +35,7 @@ VelopackApp.build()
   .run();
 
 const updateUrl = __AMANE_UPDATE_URL__.trim();
+const updateChannel = (__AMANE_UPDATE_CHANNEL__ || 'win').trim() || 'win';
 const inventoryFilesFolderName = 'Inventory Files';
 
 let mainWindow: BrowserWindow | null = null;
@@ -42,6 +43,8 @@ let currentFilePath: string | null = null;
 let currentInventory: InventoryFile | null = null;
 let pendingUpdate: UpdateInfo | null = null;
 let downloadedUpdate: UpdateInfo | null = null;
+let inventoryWriteQueue: Promise<void> = Promise.resolve();
+const lookupTasks = new Set<string>();
 
 function dialogParent(): BrowserWindow {
   if (!mainWindow) {
@@ -58,6 +61,21 @@ function currentDocument(): InventoryDocument {
   };
 }
 
+function queueInventoryWrite<T>(task: () => Promise<T>): Promise<T> {
+  const result = inventoryWriteQueue.then(task, task);
+  inventoryWriteQueue = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function emitInventoryChanged(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('inventory:changed', currentDocument());
+  }
+}
+
 async function saveCurrentInventory(): Promise<void> {
   if (!currentFilePath || !currentInventory) {
     throw new Error('请先新建或打开库存文件。');
@@ -71,6 +89,35 @@ function requireInventory(): InventoryFile {
     throw new Error('请先新建或打开库存文件。');
   }
   return currentInventory;
+}
+
+function isCurrentInventoryPath(filePath: string): boolean {
+  return Boolean(
+    currentFilePath && path.normalize(currentFilePath).toLowerCase() === path.normalize(filePath).toLowerCase()
+  );
+}
+
+async function readInventoryForPath(filePath: string): Promise<InventoryFile | null> {
+  if (isCurrentInventoryPath(filePath)) {
+    return currentInventory;
+  }
+
+  try {
+    return await readInventoryFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function persistInventoryForPath(filePath: string, inventory: InventoryFile): Promise<void> {
+  if (isCurrentInventoryPath(filePath)) {
+    currentInventory = inventory;
+    await writeInventoryFile(filePath, inventory);
+    emitInventoryChanged();
+    return;
+  }
+
+  await writeInventoryFile(filePath, inventory);
 }
 
 async function loadLastInventory(): Promise<void> {
@@ -138,11 +185,13 @@ function registerIpcHandlers(): void {
     }
 
     const filePath = normalizeJsonPath(result.filePath);
-    const inventoryName = path.basename(filePath, path.extname(filePath));
-    currentInventory = await createInventoryFile(filePath, inventoryName);
-    currentFilePath = filePath;
-    await writeSettings(app.getPath('userData'), { lastInventoryPath: filePath });
-    return currentDocument();
+    return queueInventoryWrite(async () => {
+      const inventoryName = path.basename(filePath, path.extname(filePath));
+      currentInventory = await createInventoryFile(filePath, inventoryName);
+      currentFilePath = filePath;
+      await writeSettings(app.getPath('userData'), { lastInventoryPath: filePath });
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:open', async () => {
@@ -158,100 +207,162 @@ function registerIpcHandlers(): void {
       return currentDocument();
     }
 
-    currentFilePath = result.filePaths[0];
-    currentInventory = await readInventoryFile(currentFilePath);
-    await writeSettings(app.getPath('userData'), { lastInventoryPath: currentFilePath });
-    return currentDocument();
+    const filePath = result.filePaths[0];
+    return queueInventoryWrite(async () => {
+      currentFilePath = filePath;
+      currentInventory = await readInventoryFile(currentFilePath);
+      await writeSettings(app.getPath('userData'), { lastInventoryPath: currentFilePath });
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:rename', async (_event, rawName: string) => {
-    const inventory = requireInventory();
-    const safeName = safeInventoryFileName(rawName);
-    if (!safeName) {
-      throw new Error('库存文件名不能为空。');
-    }
-
-    const oldPath = currentFilePath;
-    if (!oldPath) {
-      throw new Error('当前库存文件没有路径。');
-    }
-
-    const newPath = path.join(path.dirname(oldPath), `${safeName}.json`);
-    if (path.normalize(newPath).toLowerCase() !== path.normalize(oldPath).toLowerCase()) {
-      try {
-        await fs.access(newPath);
-        throw new Error(`目标文件已存在：${newPath}`);
-      } catch (error) {
-        if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
-          throw error;
-        }
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      const safeName = safeInventoryFileName(rawName);
+      if (!safeName) {
+        throw new Error('库存文件名不能为空。');
       }
-      await fs.rename(oldPath, newPath);
-    }
 
-    currentFilePath = newPath;
-    currentInventory = { ...inventory, inventoryName: safeName, updatedAt: new Date().toISOString() };
-    await saveCurrentInventory();
-    return currentDocument();
+      const oldPath = currentFilePath;
+      if (!oldPath) {
+        throw new Error('当前库存文件没有路径。');
+      }
+
+      const newPath = path.join(path.dirname(oldPath), `${safeName}.json`);
+      if (path.normalize(newPath).toLowerCase() !== path.normalize(oldPath).toLowerCase()) {
+        try {
+          await fs.access(newPath);
+          throw new Error(`目标文件已存在：${newPath}`);
+        } catch (error) {
+          if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+            throw error;
+          }
+        }
+        await fs.rename(oldPath, newPath);
+      }
+
+      currentFilePath = newPath;
+      currentInventory = { ...inventory, inventoryName: safeName, updatedAt: new Date().toISOString() };
+      await saveCurrentInventory();
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:submit-barcode', async (_event, rawBarcode: string, mode) => {
-    const inventory = requireInventory();
-    const barcode = normalizeBarcode(rawBarcode);
-    const beforeItem = inventory.items[barcode];
-    const result = submitBarcode(inventory, barcode, mode);
+    const response = await queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      const barcode = normalizeBarcode(rawBarcode);
+      const beforeItem = inventory.items[barcode];
+      const result = submitBarcode(inventory, barcode, mode);
 
-    if (!result.ok) {
-      return toSubmitResult(false, result.message, currentDocument(), result.item);
+      if (!result.ok) {
+        return {
+          submitResult: toSubmitResult(false, result.message, currentDocument(), result.item),
+          lookupFilePath: null,
+          lookupBarcode: '',
+          shouldStartLookup: false
+        };
+      }
+
+      const shouldStartLookup = shouldLookup(beforeItem);
+      currentInventory = shouldStartLookup
+        ? applyLookupResult(result.inventory, loadingLookupResult(barcode))
+        : result.inventory;
+      await saveCurrentInventory();
+
+      return {
+        submitResult: toSubmitResult(
+          true,
+          shouldStartLookup ? `${result.message}，正在后台查询商品名称。` : result.message,
+          currentDocument(),
+          currentInventory?.items[barcode]
+        ),
+        lookupFilePath: currentFilePath,
+        lookupBarcode: barcode,
+        shouldStartLookup
+      };
+    });
+
+    if (response.shouldStartLookup && response.lookupFilePath) {
+      startLookupForFile(response.lookupBarcode, response.lookupFilePath);
     }
 
-    currentInventory = result.inventory;
-    await saveCurrentInventory();
-
-    let lookup: ProductLookupResult | undefined;
-    if (shouldLookup(beforeItem)) {
-      lookup = await lookupAndSave(barcode);
-    }
-
-    return toSubmitResult(true, lookupMessage(result.message, lookup), currentDocument(), currentInventory?.items[barcode], lookup);
+    return response.submitResult;
   });
 
   ipcMain.handle('inventory:update-nickname', async (_event, barcode: string, nickname: string) => {
-    const inventory = requireInventory();
-    currentInventory = updateNickname(inventory, barcode, nickname);
-    await saveCurrentInventory();
-    return currentDocument();
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      currentInventory = updateNickname(inventory, barcode, nickname);
+      await saveCurrentInventory();
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:update-price', async (_event, barcode: string, priceAmount: number | null, priceCurrency) => {
-    const inventory = requireInventory();
-    currentInventory = updatePrice(inventory, barcode, priceAmount, priceCurrency);
-    await saveCurrentInventory();
-    return currentDocument();
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      currentInventory = updatePrice(inventory, barcode, priceAmount, priceCurrency);
+      await saveCurrentInventory();
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:delete-item', async (_event, barcode: string) => {
-    const inventory = requireInventory();
-    currentInventory = deleteInventoryItem(inventory, barcode);
-    await saveCurrentInventory();
-    return currentDocument();
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      currentInventory = deleteInventoryItem(inventory, barcode);
+      await saveCurrentInventory();
+      return currentDocument();
+    });
   });
 
   ipcMain.handle('inventory:refresh-lookup', async (_event, rawBarcode: string) => {
-    requireInventory();
-    const barcode = normalizeBarcode(rawBarcode);
-    if (!barcode) {
-      return toSubmitResult(false, '条码不能为空。', currentDocument());
+    const response = await queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      const barcode = normalizeBarcode(rawBarcode);
+      if (!barcode) {
+        return {
+          submitResult: toSubmitResult(false, '条码不能为空。', currentDocument()),
+          lookupFilePath: null,
+          lookupBarcode: '',
+          shouldStartLookup: false
+        };
+      }
+      if (!inventory.items[barcode]) {
+        return {
+          submitResult: toSubmitResult(false, `当前库存文件中没有该条码：${barcode}`, currentDocument()),
+          lookupFilePath: null,
+          lookupBarcode: barcode,
+          shouldStartLookup: false
+        };
+      }
+
+      const alreadyRunning = currentFilePath ? isLookupRunning(barcode, currentFilePath) : false;
+      if (!alreadyRunning) {
+        currentInventory = applyLookupResult(inventory, loadingLookupResult(barcode));
+        await saveCurrentInventory();
+      }
+
+      return {
+        submitResult: toSubmitResult(
+          true,
+          alreadyRunning ? '该条码已有后台查询任务。' : '已开始后台刷新商品名称。',
+          currentDocument(),
+          currentInventory?.items[barcode]
+        ),
+        lookupFilePath: currentFilePath,
+        lookupBarcode: barcode,
+        shouldStartLookup: !alreadyRunning
+      };
+    });
+
+    if (response.shouldStartLookup && response.lookupFilePath) {
+      startLookupForFile(response.lookupBarcode, response.lookupFilePath);
     }
 
-    const lookup = await lookupAndSave(barcode);
-    return toSubmitResult(
-      lookup.status === 'found',
-      lookupMessage('已刷新联网查询。', lookup),
-      currentDocument(),
-      currentInventory?.items[barcode],
-      lookup
-    );
+    return response.submitResult;
   });
 
   ipcMain.handle('inventory:export', async (_event, format: ExportFormat) => {
@@ -277,12 +388,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle('app:open-path', (_event, filePath: string) => shell.showItemInFolder(filePath));
 }
 
-async function lookupAndSave(barcode: string): Promise<ProductLookupResult> {
-  if (!currentInventory) {
-    throw new Error('请先新建或打开库存文件。');
-  }
-
-  currentInventory = applyLookupResult(currentInventory, {
+function loadingLookupResult(barcode: string): ProductLookupResult {
+  return {
     barcode,
     status: 'loading',
     productName: '',
@@ -292,36 +399,66 @@ async function lookupAndSave(barcode: string): Promise<ProductLookupResult> {
     source: 'none',
     confidence: 0,
     lookedUpAt: new Date().toISOString()
+  };
+}
+
+function errorLookupResult(barcode: string, error: unknown): ProductLookupResult {
+  return {
+    barcode,
+    status: 'error',
+    productName: '',
+    brand: '',
+    category: '',
+    imageUrl: '',
+    source: 'none',
+    confidence: 0,
+    lookedUpAt: new Date().toISOString(),
+    errorMessage: error instanceof Error ? error.message : String(error)
+  };
+}
+
+function lookupTaskKey(barcode: string, filePath: string): string {
+  return `${path.normalize(filePath).toLowerCase()}\0${barcode}`;
+}
+
+function isLookupRunning(barcode: string, filePath: string): boolean {
+  return lookupTasks.has(lookupTaskKey(barcode, filePath));
+}
+
+function startLookupForFile(barcode: string, filePath: string): boolean {
+  const key = lookupTaskKey(barcode, filePath);
+  if (lookupTasks.has(key)) {
+    return false;
+  }
+
+  lookupTasks.add(key);
+  void runLookupForFile(barcode, filePath)
+    .catch((error) => {
+      console.error('Background barcode lookup failed:', error);
+    })
+    .finally(() => {
+      lookupTasks.delete(key);
+    });
+  return true;
+}
+
+async function runLookupForFile(barcode: string, filePath: string): Promise<void> {
+  let lookup: ProductLookupResult;
+  try {
+    lookup = await lookupBarcode(barcode);
+  } catch (error) {
+    lookup = errorLookupResult(barcode, error);
+  }
+
+  await queueInventoryWrite(async () => {
+    const inventory = await readInventoryForPath(filePath);
+    if (!inventory?.items[barcode]) {
+      return;
+    }
+
+    const next = applyLookupResult(inventory, lookup);
+    await persistInventoryForPath(filePath, next);
   });
-  await saveCurrentInventory();
-
-  const lookup = await lookupBarcode(barcode);
-  currentInventory = applyLookupResult(currentInventory, lookup);
-  await saveCurrentInventory();
-  return lookup;
-}
-
-function lookupMessage(baseMessage: string, lookup?: ProductLookupResult): string {
-  if (!lookup) {
-    return baseMessage;
-  }
-  if (lookup.status === 'found') {
-    return `${baseMessage} 已识别：${lookup.productName}（${lookupSourceLabel(lookup.source)}）`;
-  }
-  if (lookup.status === 'not_found') {
-    return `${baseMessage} 未查询到商品名称，可手动编辑昵称。`;
-  }
-  if (lookup.status === 'error') {
-    return `${baseMessage} 联网查询失败，可稍后重试。`;
-  }
-  return baseMessage;
-}
-
-function lookupSourceLabel(source: ProductLookupResult['source']): string {
-  if (source === 'upcitemdb') return 'UPCitemdb';
-  if (source === 'openfoodfacts') return 'Open Food Facts';
-  if (source === 'web_search') return '网页搜索';
-  return '无来源';
 }
 
 function exportFilters(format: ExportFormat): Electron.FileFilter[] {
@@ -344,7 +481,7 @@ async function checkForUpdates(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = new UpdateManager(updateUrl);
+    const manager = createUpdateManager();
     const update = await manager.checkForUpdatesAsync();
     pendingUpdate = update;
     downloadedUpdate = null;
@@ -378,7 +515,7 @@ async function downloadUpdate(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = new UpdateManager(updateUrl);
+    const manager = createUpdateManager();
     if (!pendingUpdate) {
       pendingUpdate = await manager.checkForUpdatesAsync();
     }
@@ -412,7 +549,7 @@ async function applyUpdate(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = new UpdateManager(updateUrl);
+    const manager = createUpdateManager();
     const update = downloadedUpdate ?? manager.getUpdatePendingRestart() ?? pendingUpdate;
     if (!update) {
       return {
@@ -434,6 +571,14 @@ async function applyUpdate(): Promise<UpdateStatus> {
   }
 }
 
+function createUpdateManager(): UpdateManager {
+  return new UpdateManager(updateUrl, {
+    AllowVersionDowngrade: false,
+    ExplicitChannel: updateChannel,
+    MaximumDeltasBeforeFallback: 10
+  });
+}
+
 function safeCurrentVersion(manager: UpdateManager): string {
   try {
     return manager.getCurrentVersion();
@@ -445,10 +590,13 @@ function safeCurrentVersion(manager: UpdateManager): string {
 function updateErrorStatus(error: unknown): UpdateStatus {
   const message = error instanceof Error ? error.message : String(error);
   const isNotInstalled = /not.?installed|NotInstalled/i.test(message);
+  const sourceDetails = `更新源：${updateUrl || '未配置'}；通道：${updateChannel}`;
   return {
     state: isNotInstalled ? 'not-installed' : 'error',
     currentVersion: app.getVersion(),
-    message: isNotInstalled ? '当前应用不是通过 Velopack 安装，更新功能需安装包版本中测试。' : message
+    message: isNotInstalled
+      ? `当前应用不是通过 Velopack 安装，更新功能需安装包版本中测试。${sourceDetails}`
+      : `${message}（${sourceDetails}）`
   };
 }
 

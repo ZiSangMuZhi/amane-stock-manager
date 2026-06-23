@@ -2,6 +2,7 @@ param(
   [string]$Version = "",
   [string]$Runtime = "win-x64",
   [string]$UpdateUrl = "",
+  [string]$UpdateChannel = "win",
   [switch]$Msi,
   [ValidateSet("PerUser", "PerMachine", "Either")]
   [string]$InstallScope = "PerUser",
@@ -27,6 +28,10 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\.-]+)?$') {
   throw "Velopack requires a SemVer2 version such as 1.2.3. Received: $Version"
 }
 
+if ([string]::IsNullOrWhiteSpace($UpdateChannel)) {
+  throw "UpdateChannel cannot be empty."
+}
+
 if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and [string]::IsNullOrWhiteSpace($UpdateUrl)) {
   $UpdateUrl = "$($GithubRepoUrl.TrimEnd('/'))/releases/latest/download/"
 } elseif (![string]::IsNullOrWhiteSpace($UpdateUrl) -and $UpdateUrl.StartsWith("http", [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -34,6 +39,7 @@ if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and [string]::IsNullOrWhiteSp
 }
 
 $env:AMANE_UPDATE_URL = $UpdateUrl
+$env:AMANE_UPDATE_CHANNEL = $UpdateChannel
 
 Write-Host "Building Electron package..."
 npm run package:win
@@ -83,7 +89,8 @@ if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and !$CleanOutput) {
   $DownloadArgs = @(
     "tool", "run", "vpk", "download", "github",
     "--repoUrl", $GithubRepoUrl,
-    "--outputDir", $OutputDir
+    "--outputDir", $OutputDir,
+    "--channel", $UpdateChannel
   )
   if (![string]::IsNullOrWhiteSpace($GitHubToken)) {
     $DownloadArgs += @("--token", $GitHubToken)
@@ -104,7 +111,8 @@ $VpkArgs = @(
   "--packTitle", "Amane Stock Manager",
   "--packAuthors", "Amane",
   "--outputDir", $OutputDir,
-  "--runtime", $Runtime
+  "--runtime", $Runtime,
+  "--channel", $UpdateChannel
 )
 
 $IconPath = Join-Path $Root "assets\app.ico"
@@ -120,6 +128,21 @@ Write-Host "Packing Velopack release $Version..."
 & dotnet @VpkArgs
 if ($LASTEXITCODE -ne 0) {
   throw "Velopack packaging failed with exit code $LASTEXITCODE"
+}
+
+$ReleaseFeedName = "releases.$UpdateChannel.json"
+$ReleaseFeedPath = Join-Path $OutputDir $ReleaseFeedName
+$CompatibilityFeedNames = @("releases.win-x64.json", "releases.stable.json", "releases.json") |
+  Where-Object { $_ -ne $ReleaseFeedName } |
+  Select-Object -Unique
+$CompatibilityFeedPaths = @()
+
+if (Test-Path -LiteralPath $ReleaseFeedPath) {
+  foreach ($FeedName in $CompatibilityFeedNames) {
+    $FeedPath = Join-Path $OutputDir $FeedName
+    Copy-Item -LiteralPath $ReleaseFeedPath -Destination $FeedPath -Force
+    $CompatibilityFeedPaths += $FeedPath
+  }
 }
 
 if ($PublishGitHub) {
@@ -154,6 +177,22 @@ if ($PublishGitHub) {
   & dotnet @UploadArgs
   if ($LASTEXITCODE -ne 0) {
     throw "Velopack GitHub upload failed with exit code $LASTEXITCODE"
+  }
+
+  if ($CompatibilityFeedPaths.Count -gt 0) {
+    $RepoSlug = $GithubRepoUrl.TrimEnd('/') -replace '^https://github\.com/', '' -replace '\.git$', ''
+    $PreviousGhToken = $env:GH_TOKEN
+    if (![string]::IsNullOrWhiteSpace($GitHubToken)) {
+      $env:GH_TOKEN = $GitHubToken
+    }
+
+    Write-Host "Uploading compatibility release feeds to GitHub..."
+    & gh release upload $Tag @CompatibilityFeedPaths --repo $RepoSlug --clobber
+    $UploadFeedsExitCode = $LASTEXITCODE
+    $env:GH_TOKEN = $PreviousGhToken
+    if ($UploadFeedsExitCode -ne 0) {
+      throw "Compatibility feed upload failed with exit code $UploadFeedsExitCode"
+    }
   }
 }
 

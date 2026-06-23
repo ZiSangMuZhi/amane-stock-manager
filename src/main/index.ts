@@ -5,6 +5,7 @@ import { UpdateInfo, UpdateManager, VelopackApp } from 'velopack';
 import {
   applyLookupResult,
   createInventory,
+  deleteInventoryItem,
   normalizeBarcode,
   shouldLookup,
   submitBarcode,
@@ -34,6 +35,7 @@ VelopackApp.build()
   .run();
 
 const updateUrl = __AMANE_UPDATE_URL__.trim();
+const inventoryFilesFolderName = 'Inventory Files';
 
 let mainWindow: BrowserWindow | null = null;
 let currentFilePath: string | null = null;
@@ -86,6 +88,17 @@ async function loadLastInventory(): Promise<void> {
   }
 }
 
+function getInstallRootDirectory(): string {
+  const exeDirectory = app.isPackaged ? path.dirname(process.execPath) : app.getPath('userData');
+  return path.basename(exeDirectory).toLowerCase() === 'current' ? path.dirname(exeDirectory) : exeDirectory;
+}
+
+async function getInventoryFilesDirectory(): Promise<string> {
+  const directory = path.join(getInstallRootDirectory(), inventoryFilesFolderName);
+  await fs.mkdir(directory, { recursive: true });
+  return directory;
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -113,9 +126,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('inventory:get-current', () => currentDocument());
 
   ipcMain.handle('inventory:create', async () => {
+    const inventoryDirectory = await getInventoryFilesDirectory();
     const result = await dialog.showSaveDialog(dialogParent(), {
       title: '新建库存文件',
-      defaultPath: '新库存.json',
+      defaultPath: path.join(inventoryDirectory, '新库存.json'),
       filters: [{ name: 'JSON 库存文件', extensions: ['json'] }]
     });
 
@@ -132,8 +146,10 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('inventory:open', async () => {
+    const inventoryDirectory = await getInventoryFilesDirectory();
     const result = await dialog.showOpenDialog(dialogParent(), {
       title: '打开库存文件',
+      defaultPath: inventoryDirectory,
       properties: ['openFile'],
       filters: [{ name: 'JSON 库存文件', extensions: ['json'] }]
     });
@@ -210,6 +226,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle('inventory:update-price', async (_event, barcode: string, priceAmount: number | null, priceCurrency) => {
     const inventory = requireInventory();
     currentInventory = updatePrice(inventory, barcode, priceAmount, priceCurrency);
+    await saveCurrentInventory();
+    return currentDocument();
+  });
+
+  ipcMain.handle('inventory:delete-item', async (_event, barcode: string) => {
+    const inventory = requireInventory();
+    currentInventory = deleteInventoryItem(inventory, barcode);
     await saveCurrentInventory();
     return currentDocument();
   });
@@ -431,6 +454,7 @@ function updateErrorStatus(error: unknown): UpdateStatus {
 
 app.whenReady().then(async () => {
   registerIpcHandlers();
+  await getInventoryFilesDirectory();
   await loadLastInventory();
   createWindow();
 

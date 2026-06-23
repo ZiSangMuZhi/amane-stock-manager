@@ -686,6 +686,15 @@ button:disabled {
   cursor: pointer;
 }
 
+.icon-button.danger {
+  color: #b42318;
+  background: #fef3f2;
+}
+
+.icon-button.danger:hover {
+  background: #fee4e2;
+}
+
 .item-stats,
 .time-list {
   display: grid;
@@ -762,6 +771,21 @@ button:disabled {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.compact-delete {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 8px;
+  color: #b42318;
+  background: #fef3f2;
+  cursor: pointer;
+}
+
+.compact-delete:hover {
+  background: #fee4e2;
 }
 
 .time-list {

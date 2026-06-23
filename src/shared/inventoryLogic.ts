@@ -35,7 +35,7 @@ export function createInventoryItem(barcode: string, timestamp = nowIso()): Inve
     category: '',
     imageUrl: '',
     priceAmount: null,
-    priceCurrency: 'JPY',
+    priceCurrency: 'CAD',
     lookupSource: 'none',
     lookupConfidence: 0,
     quantityOnHand: 0,
@@ -144,6 +144,23 @@ export function updatePrice(
   item.priceCurrency = priceCurrency;
   item.updatedAt = timestamp;
   next.items[barcode] = item;
+  next.updatedAt = timestamp;
+  return next;
+}
+
+export function deleteInventoryItem(
+  inventory: InventoryFile,
+  rawBarcode: string,
+  timestamp = nowIso()
+): InventoryFile {
+  const barcode = normalizeBarcode(rawBarcode);
+  if (!barcode || !inventory.items[barcode]) {
+    return inventory;
+  }
+
+  const next = cloneInventory(inventory);
+  delete next.items[barcode];
+  next.transactions = next.transactions.filter((transaction) => transaction.barcode !== barcode);
   next.updatedAt = timestamp;
   return next;
 }

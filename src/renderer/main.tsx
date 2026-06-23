@@ -21,6 +21,7 @@ import {
   ScanBarcode,
   SearchX,
   Sheet,
+  Trash2,
   UploadCloud,
   Wifi,
   WifiOff,
@@ -42,7 +43,7 @@ type ViewMode = 'standard' | 'compact';
 type PriceDraft = { amount: string; currency: CurrencyCode };
 
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
-const currencyOptions: CurrencyCode[] = ['JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
+const currencyOptions: CurrencyCode[] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
 
 function App(): JSX.Element {
   const [document, setDocument] = useState<InventoryDocument>(emptyDocument);
@@ -80,7 +81,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.4'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.5'));
   }, []);
 
   useEffect(() => {
@@ -213,6 +214,18 @@ function App(): JSX.Element {
     });
   }
 
+  async function handleDeleteItem(item: InventoryItem): Promise<void> {
+    const name = item.nickname || item.lookupName || item.barcode;
+    if (!window.confirm(`删除品类「${name}」？该条码的库存和流水记录都会从当前库存文件移除。`)) {
+      return;
+    }
+
+    await runAction(() => window.amaneStock.deleteItem(item.barcode), (next) => {
+      setDocument(next);
+      setNotice({ type: 'success', text: '品类已删除。' });
+    });
+  }
+
   async function handleExport(format: ExportFormat): Promise<void> {
     setExportOpen(false);
     await runAction(() => window.amaneStock.exportInventory(format), (result) => {
@@ -250,7 +263,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.4'}</span>
+            <span>{version ? `v${version}` : 'v0.1.5'}</span>
           </div>
         </div>
 
@@ -441,6 +454,15 @@ function App(): JSX.Element {
                       <strong>{item.quantityOnHand}</strong>
                       <span>{formatUnitPrice(item)}</span>
                       <span>{formatStockValue(item)}</span>
+                      <button
+                        type="button"
+                        className="compact-delete"
+                        onClick={() => handleDeleteItem(item)}
+                        disabled={busy}
+                        title="删除品类"
+                      >
+                        <Trash2 size={14} />
+                      </button>
                     </div>
                   </article>
                 ) : (
@@ -530,6 +552,15 @@ function App(): JSX.Element {
                     </span>
                     <button type="button" className="icon-button" onClick={() => handleRefreshLookup(item)} disabled={busy}>
                       <RefreshCw size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      onClick={() => handleDeleteItem(item)}
+                      disabled={busy}
+                      title="删除品类"
+                    >
+                      <Trash2 size={15} />
                     </button>
                   </div>
 

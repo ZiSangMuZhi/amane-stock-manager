@@ -4,7 +4,7 @@
 
 ```powershell
 npm install
-npm run velopack:pack -- -Version 0.1.4
+npm run velopack:pack -- -Version 0.1.5
 ```
 
 This creates Velopack output in `Releases/`, including `Setup.exe`, full update packages, release indexes, and portable output when supported by Velopack.
@@ -12,7 +12,7 @@ This creates Velopack output in `Releases/`, including `Setup.exe`, full update 
 For local rebuilds of the same version, clean generated release output first:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.4 -CleanOutput
+npm run velopack:pack -- -Version 0.1.5 -CleanOutput
 ```
 
 ## Updates
@@ -20,7 +20,7 @@ npm run velopack:pack -- -Version 0.1.4 -CleanOutput
 Build with an HTTPS update feed:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.4 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
+npm run velopack:pack -- -Version 0.1.5 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
 ```
 
 When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. `-PublishGitHub` uploads the generated Velopack assets to a published GitHub Release.
@@ -31,7 +31,7 @@ Velopack's Windows installer registers the app in Windows Apps & Features. Unins
 
 The packaged application also includes `Uninstall Amane Stock Manager.cmd`, which calls Velopack's `Update.exe --uninstall` from the install root.
 
-User-created inventory JSON files are intentionally stored wherever the user creates them, not inside the install directory. The uninstall hook does not delete those files.
+The app creates an `Inventory Files` folder in the install root and uses it as the default place for user inventory JSON files. Users can still choose another location from the file dialogs.
 
 ## Install directory normalization
 
@@ -55,11 +55,11 @@ msiexec /i AmaneStockManager.msi VELOPACK_INSTALLDIR="D:\Apps\Amane Stock Manage
 To also generate an MSI:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.4 -Msi
+npm run velopack:pack -- -Version 0.1.5 -Msi
 ```
 
 The MSI default scope is `PerUser`. To change it at package time:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.4 -Msi -InstallScope PerMachine
+npm run velopack:pack -- -Version 0.1.5 -Msi -InstallScope PerMachine
 ```

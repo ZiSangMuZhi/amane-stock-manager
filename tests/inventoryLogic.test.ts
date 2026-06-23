@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createInventory, submitBarcode, updateNickname, updatePrice } from '../src/shared/inventoryLogic';
+import { createInventory, deleteInventoryItem, submitBarcode, updateNickname, updatePrice } from '../src/shared/inventoryLogic';
 
 describe('inventory logic', () => {
   it('records barcode intake and aggregates stock', () => {
@@ -27,9 +27,17 @@ describe('inventory logic', () => {
 
   it('stores item prices and currency for value statistics', () => {
     const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
-    const priced = updatePrice(stocked.inventory, '4573102661449', 2480.559, 'JPY', '2026-06-23T12:01:00.000Z');
+    const priced = updatePrice(stocked.inventory, '4573102661449', 2480.559, 'CAD', '2026-06-23T12:01:00.000Z');
 
     expect(priced.items['4573102661449']?.priceAmount).toBe(2480.56);
-    expect(priced.items['4573102661449']?.priceCurrency).toBe('JPY');
+    expect(priced.items['4573102661449']?.priceCurrency).toBe('CAD');
+  });
+
+  it('deletes an item category and its transactions', () => {
+    const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
+    const removed = deleteInventoryItem(stocked.inventory, '4573102661449', '2026-06-23T12:01:00.000Z');
+
+    expect(removed.items['4573102661449']).toBeUndefined();
+    expect(removed.transactions).toHaveLength(0);
   });
 });

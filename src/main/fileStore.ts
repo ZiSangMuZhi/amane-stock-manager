@@ -10,7 +10,7 @@ import {
 } from '../shared/types';
 
 const lookupStatuses: LookupStatus[] = ['idle', 'loading', 'found', 'not_found', 'error'];
-const currencyCodes: InventoryItem['priceCurrency'][] = ['JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
+const currencyCodes: InventoryItem['priceCurrency'][] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
 
 export interface StoredSettings {
   lastInventoryPath?: string;
@@ -174,5 +174,5 @@ function asNullableNonNegativeNumber(value: unknown): number | null {
 }
 
 function asCurrencyCode(value: unknown): InventoryItem['priceCurrency'] {
-  return currencyCodes.includes(value as InventoryItem['priceCurrency']) ? (value as InventoryItem['priceCurrency']) : 'JPY';
+  return currencyCodes.includes(value as InventoryItem['priceCurrency']) ? (value as InventoryItem['priceCurrency']) : 'CAD';
 }

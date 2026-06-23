@@ -48,6 +48,25 @@ if (!(Test-Path -LiteralPath $MainExePath)) {
   throw "Packaged executable not found: $MainExePath"
 }
 
+$UninstallerPath = Join-Path $PackDir "Uninstall Amane Stock Manager.cmd"
+$UninstallerContent = @'
+@echo off
+setlocal
+set "HERE=%~dp0"
+if exist "%HERE%Update.exe" (
+  "%HERE%Update.exe" --uninstall
+  exit /b %ERRORLEVEL%
+)
+if exist "%HERE%..\Update.exe" (
+  "%HERE%..\Update.exe" --uninstall
+  exit /b %ERRORLEVEL%
+)
+echo Velopack uninstaller was not found.
+pause
+exit /b 1
+'@
+Set-Content -LiteralPath $UninstallerPath -Value $UninstallerContent -Encoding ASCII
+
 $OutputDir = Join-Path $Root "Releases"
 if ($CleanOutput -and (Test-Path -LiteralPath $OutputDir)) {
   $ResolvedRoot = [System.IO.Path]::GetFullPath($Root)

@@ -1,9 +1,10 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export type InventoryMode = 'in' | 'out';
 export type LookupStatus = 'idle' | 'loading' | 'found' | 'not_found' | 'error';
 export type ExportFormat = 'json' | 'csv-items' | 'csv-transactions' | 'xlsx';
 export type ProductLookupSource = 'upcitemdb' | 'openfoodfacts' | 'web_search' | 'none';
+export type CurrencyCode = 'JPY' | 'USD' | 'CNY' | 'EUR' | 'GBP' | 'TWD' | 'HKD';
 
 export interface InventoryItem {
   barcode: string;
@@ -12,6 +13,8 @@ export interface InventoryItem {
   brand: string;
   category: string;
   imageUrl: string;
+  priceAmount: number | null;
+  priceCurrency: CurrencyCode;
   lookupSource: ProductLookupSource;
   lookupConfidence: number;
   quantityOnHand: number;
@@ -93,6 +96,7 @@ export interface RendererApi {
   renameInventory(newName: string): Promise<InventoryDocument>;
   submitBarcode(barcode: string, mode: InventoryMode): Promise<SubmitBarcodeResult>;
   updateNickname(barcode: string, nickname: string): Promise<InventoryDocument>;
+  updatePrice(barcode: string, priceAmount: number | null, priceCurrency: CurrencyCode): Promise<InventoryDocument>;
   refreshLookup(barcode: string): Promise<SubmitBarcodeResult>;
   exportInventory(format: ExportFormat): Promise<ExportResult>;
   getVersion(): Promise<string>;

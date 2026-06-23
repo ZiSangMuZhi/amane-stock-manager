@@ -9,7 +9,8 @@ import {
   shouldLookup,
   submitBarcode,
   toSubmitResult,
-  updateNickname
+  updateNickname,
+  updatePrice
 } from '../shared/inventoryLogic';
 import { ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
 import {
@@ -202,6 +203,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle('inventory:update-nickname', async (_event, barcode: string, nickname: string) => {
     const inventory = requireInventory();
     currentInventory = updateNickname(inventory, barcode, nickname);
+    await saveCurrentInventory();
+    return currentDocument();
+  });
+
+  ipcMain.handle('inventory:update-price', async (_event, barcode: string, priceAmount: number | null, priceCurrency) => {
+    const inventory = requireInventory();
+    currentInventory = updatePrice(inventory, barcode, priceAmount, priceCurrency);
     await saveCurrentInventory();
     return currentDocument();
   });

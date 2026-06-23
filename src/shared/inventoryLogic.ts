@@ -34,6 +34,8 @@ export function createInventoryItem(barcode: string, timestamp = nowIso()): Inve
     brand: '',
     category: '',
     imageUrl: '',
+    priceAmount: null,
+    priceCurrency: 'JPY',
     lookupSource: 'none',
     lookupConfidence: 0,
     quantityOnHand: 0,
@@ -128,6 +130,24 @@ export function updateNickname(
   return next;
 }
 
+export function updatePrice(
+  inventory: InventoryFile,
+  rawBarcode: string,
+  priceAmount: number | null,
+  priceCurrency: InventoryItem['priceCurrency'],
+  timestamp = nowIso()
+): InventoryFile {
+  const barcode = normalizeBarcode(rawBarcode);
+  const next = cloneInventory(inventory);
+  const item = next.items[barcode] ?? createInventoryItem(barcode, timestamp);
+  item.priceAmount = normalizePriceAmount(priceAmount);
+  item.priceCurrency = priceCurrency;
+  item.updatedAt = timestamp;
+  next.items[barcode] = item;
+  next.updatedAt = timestamp;
+  return next;
+}
+
 export function applyLookupResult(
   inventory: InventoryFile,
   lookup: ProductLookupResult
@@ -172,4 +192,11 @@ function cryptoRandomId(): string {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizePriceAmount(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.round(value * 100) / 100);
 }

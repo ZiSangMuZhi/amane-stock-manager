@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import {
+  CurrencyCode,
   ExportFormat,
   InventoryDocument,
   InventoryItem,
@@ -37,8 +38,11 @@ import {
 } from '../shared/types';
 
 type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
+type ViewMode = 'standard' | 'compact';
+type PriceDraft = { amount: string; currency: CurrencyCode };
 
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
+const currencyOptions: CurrencyCode[] = ['JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
 
 function App(): JSX.Element {
   const [document, setDocument] = useState<InventoryDocument>(emptyDocument);
@@ -50,6 +54,8 @@ function App(): JSX.Element {
   const [exportOpen, setExportOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
+  const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
+  const [viewMode, setViewMode] = useState<ViewMode>('standard');
   const [version, setVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
@@ -62,20 +68,35 @@ function App(): JSX.Element {
         acc.quantity += item.quantityOnHand;
         acc.in += item.totalIn;
         acc.out += item.totalOut;
+        if (item.priceAmount !== null && item.quantityOnHand > 0) {
+          acc.valueByCurrency[item.priceCurrency] =
+            (acc.valueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * item.quantityOnHand;
+        }
         return acc;
       },
-      { quantity: 0, in: 0, out: 0 }
+      { quantity: 0, in: 0, out: 0, valueByCurrency: {} as Partial<Record<CurrencyCode, number>> }
     );
   }, [items]);
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.3'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.4'));
   }, []);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(items.map((item) => [item.barcode, item.nickname]));
     setNicknameDrafts(nextDrafts);
+    setPriceDrafts(
+      Object.fromEntries(
+        items.map((item) => [
+          item.barcode,
+          {
+            amount: item.priceAmount === null ? '' : String(item.priceAmount),
+            currency: item.priceCurrency
+          }
+        ])
+      )
+    );
   }, [items]);
 
   useEffect(() => {
@@ -161,6 +182,30 @@ function App(): JSX.Element {
     });
   }
 
+  async function handlePriceBlur(item: InventoryItem): Promise<void> {
+    const draft = priceDrafts[item.barcode] ?? { amount: '', currency: item.priceCurrency };
+    const parsed = parsePrice(draft.amount);
+    if (parsed === item.priceAmount && draft.currency === item.priceCurrency) {
+      return;
+    }
+
+    await runAction(() => window.amaneStock.updatePrice(item.barcode, parsed, draft.currency), (next) => {
+      setDocument(next);
+      setNotice({ type: 'success', text: '价格已保存。' });
+    });
+  }
+
+  async function handleCurrencyChange(item: InventoryItem, currency: CurrencyCode): Promise<void> {
+    const draft = priceDrafts[item.barcode] ?? { amount: '', currency: item.priceCurrency };
+    const nextDraft = { ...draft, currency };
+    setPriceDrafts((drafts) => ({ ...drafts, [item.barcode]: nextDraft }));
+
+    await runAction(() => window.amaneStock.updatePrice(item.barcode, parsePrice(nextDraft.amount), currency), (next) => {
+      setDocument(next);
+      setNotice({ type: 'success', text: '货币单位已保存。' });
+    });
+  }
+
   async function handleRefreshLookup(item: InventoryItem): Promise<void> {
     await runAction(() => window.amaneStock.refreshLookup(item.barcode), (result) => {
       setDocument(result.document);
@@ -205,7 +250,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.3'}</span>
+            <span>{version ? `v${version}` : 'v0.1.4'}</span>
           </div>
         </div>
 
@@ -306,6 +351,7 @@ function App(): JSX.Element {
             <Metric label="当前库存" value={totals.quantity} icon={<PackageCheck size={18} />} />
             <Metric label="累计录入" value={totals.in} icon={<PackagePlus size={18} />} />
             <Metric label="累计出库" value={totals.out} icon={<PackageMinus size={18} />} />
+            <Metric label="库存估值" value={formatValueSummary(totals.valueByCurrency)} icon={<Download size={18} />} />
           </div>
         </section>
 
@@ -326,6 +372,14 @@ function App(): JSX.Element {
           )}
 
           <div className="update-strip">
+            <div className="view-control" aria-label="显示模式">
+              <button type="button" className={viewMode === 'standard' ? 'active' : ''} onClick={() => setViewMode('standard')}>
+                标准
+              </button>
+              <button type="button" className={viewMode === 'compact' ? 'active' : ''} onClick={() => setViewMode('compact')}>
+                缩略
+              </button>
+            </div>
             <span className={`update-dot ${updateStatus?.state ?? 'idle'}`} />
             <span>{updateStatus?.message ?? '更新状态未检查'}</span>
             <button type="button" onClick={handleCheckUpdates} disabled={busy}>
@@ -367,19 +421,32 @@ function App(): JSX.Element {
         )}
 
         {inventory && (
-          <section className="inventory-grid" aria-label="库存商品">
+          <section className={`inventory-grid ${viewMode === 'compact' ? 'compact-grid' : ''}`} aria-label="库存商品">
             {items.length === 0 ? (
               <div className="empty-grid">
                 <ScanBarcode size={36} />
                 <span>暂无商品</span>
               </div>
             ) : (
-              items.map((item) => (
+              items.map((item) =>
+                viewMode === 'compact' ? (
+                  <article className={`compact-card ${item.quantityOnHand === 0 ? 'empty' : ''}`} key={item.barcode}>
+                    <ProductThumb item={item} />
+                    <div className="compact-main">
+                      <strong>{item.nickname || item.lookupName || item.barcode}</strong>
+                      <code>{item.barcode}</code>
+                      <span>{item.lookupName || '未识别商品'}</span>
+                    </div>
+                    <div className="compact-numbers">
+                      <strong>{item.quantityOnHand}</strong>
+                      <span>{formatUnitPrice(item)}</span>
+                      <span>{formatStockValue(item)}</span>
+                    </div>
+                  </article>
+                ) : (
                 <article className={`item-card ${item.quantityOnHand === 0 ? 'empty' : ''}`} key={item.barcode}>
                   <div className="item-head">
-                    <div className={`stock-icon ${item.quantityOnHand === 0 ? 'zero' : 'ok'}`} aria-hidden="true">
-                      {item.quantityOnHand === 0 ? <PackageX size={24} /> : <PackageCheck size={24} />}
-                    </div>
+                    <ProductThumb item={item} />
                     <div className="item-title">
                       <h2>{item.nickname || item.lookupName || item.barcode}</h2>
                       <span>{item.lookupName || '未识别商品'}</span>
@@ -407,6 +474,49 @@ function App(): JSX.Element {
                       }}
                     />
                   </label>
+
+                  <div className="price-row">
+                    <label className="price-field">
+                      <span>单价</span>
+                      <input
+                        value={priceDrafts[item.barcode]?.amount ?? ''}
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        onChange={(event) =>
+                          setPriceDrafts((drafts) => ({
+                            ...drafts,
+                            [item.barcode]: {
+                              amount: event.target.value,
+                              currency: drafts[item.barcode]?.currency ?? item.priceCurrency
+                            }
+                          }))
+                        }
+                        onBlur={() => handlePriceBlur(item)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.currentTarget.blur();
+                          }
+                        }}
+                      />
+                    </label>
+                    <label className="currency-field">
+                      <span>货币</span>
+                      <select
+                        value={priceDrafts[item.barcode]?.currency ?? item.priceCurrency}
+                        onChange={(event) => handleCurrencyChange(item, event.target.value as CurrencyCode)}
+                      >
+                        {currencyOptions.map((currency) => (
+                          <option key={currency} value={currency}>
+                            {currency}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="value-field">
+                      <span>库存价值</span>
+                      <strong>{formatStockValue(item)}</strong>
+                    </div>
+                  </div>
 
                   <div className="status-row">
                     <StatusPill status={item.lookupStatus} />
@@ -453,7 +563,8 @@ function App(): JSX.Element {
                     </div>
                   </dl>
                 </article>
-              ))
+                )
+              )
             )}
           </section>
         )}
@@ -494,12 +605,28 @@ function App(): JSX.Element {
   );
 }
 
-function Metric({ label, value, icon }: { label: string; value: number; icon: React.ReactNode }): JSX.Element {
+function Metric({ label, value, icon }: { label: string; value: number | string; icon: React.ReactNode }): JSX.Element {
   return (
     <div className="metric">
       {icon}
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ProductThumb({ item }: { item: InventoryItem }): JSX.Element {
+  if (item.imageUrl) {
+    return (
+      <div className={`product-thumb ${item.quantityOnHand === 0 ? 'zero' : 'ok'}`}>
+        <img src={item.imageUrl} alt="" loading="lazy" />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`product-thumb ${item.quantityOnHand === 0 ? 'zero' : 'ok'}`} aria-hidden="true">
+      {item.quantityOnHand === 0 ? <PackageX size={24} /> : <PackageCheck size={24} />}
     </div>
   );
 }
@@ -557,6 +684,47 @@ function formatTime(value: string | null): string {
   } catch {
     return value;
   }
+}
+
+function parsePrice(value: string): number | null {
+  const normalized = value.replace(/,/g, '').trim();
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.round(parsed * 100) / 100;
+}
+
+function formatUnitPrice(item: InventoryItem): string {
+  if (item.priceAmount === null) {
+    return '未定价';
+  }
+  return `${item.priceCurrency} ${formatNumber(item.priceAmount)}`;
+}
+
+function formatStockValue(item: InventoryItem): string {
+  if (item.priceAmount === null) {
+    return '-';
+  }
+  return `${item.priceCurrency} ${formatNumber(item.priceAmount * item.quantityOnHand)}`;
+}
+
+function formatValueSummary(values: Partial<Record<CurrencyCode, number>>): string {
+  const entries = Object.entries(values).filter(([, value]) => typeof value === 'number' && value > 0);
+  if (entries.length === 0) {
+    return '-';
+  }
+  return entries.map(([currency, value]) => `${currency} ${formatNumber(value ?? 0)}`).join(' / ');
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 2
+  }).format(value);
 }
 
 function sourceLabel(source: InventoryItem['lookupSource'], confidence: number): string {

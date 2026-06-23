@@ -243,6 +243,8 @@ button:disabled {
 
 .scan-form input,
 .nickname-field input,
+.price-field input,
+.currency-field select,
 .modal input {
   width: 100%;
   min-width: 0;
@@ -261,6 +263,8 @@ button:disabled {
 
 .scan-form input:focus,
 .nickname-field input:focus,
+.price-field input:focus,
+.currency-field select:focus,
 .modal input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
@@ -278,7 +282,7 @@ button:disabled {
 
 .summary-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(92px, 1fr));
+  grid-template-columns: repeat(4, minmax(92px, 1fr));
   gap: 8px;
 }
 
@@ -305,7 +309,10 @@ button:disabled {
 .metric strong {
   grid-column: 2;
   color: #111827;
-  font-size: 19px;
+  font-size: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-band {
@@ -375,7 +382,7 @@ button:disabled {
   font-size: 13px;
 }
 
-.update-strip > span:nth-child(2) {
+.update-strip > span:not(.update-dot) {
   max-width: 360px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -385,6 +392,30 @@ button:disabled {
 .update-strip button {
   min-height: 32px;
   padding: 0 10px;
+}
+
+.view-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: 128px;
+  min-height: 32px;
+  padding: 3px;
+  border: 1px solid #d6dce6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.view-control button {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #667085;
+  background: transparent;
+}
+
+.view-control button.active {
+  color: #ffffff;
+  background: #2563eb;
 }
 
 .update-dot {
@@ -432,6 +463,11 @@ button:disabled {
   gap: 14px;
 }
 
+.inventory-grid.compact-grid {
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
 .empty-grid {
   display: grid;
   min-height: 220px;
@@ -467,22 +503,29 @@ button:disabled {
   min-width: 0;
 }
 
-.stock-icon {
+.product-thumb {
   display: grid;
   width: 46px;
   height: 46px;
   place-items: center;
   border-radius: 8px;
+  overflow: hidden;
 }
 
-.stock-icon.ok {
+.product-thumb.ok {
   color: #05603a;
   background: #dcfae6;
 }
 
-.stock-icon.zero {
+.product-thumb.zero {
   color: #b42318;
   background: #fee4e2;
+}
+
+.product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .item-title {
@@ -539,6 +582,46 @@ button:disabled {
   color: #475467;
   font-size: 13px;
   font-weight: 650;
+}
+
+.price-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px minmax(96px, 0.72fr);
+  gap: 8px;
+  align-items: end;
+  min-width: 0;
+}
+
+.price-field,
+.currency-field,
+.value-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.price-field input,
+.currency-field select {
+  min-height: 38px;
+  padding: 0 10px;
+  font-weight: 500;
+}
+
+.value-field {
+  min-height: 58px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.value-field strong {
+  overflow: hidden;
+  color: #111827;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nickname-field input,
@@ -609,6 +692,76 @@ button:disabled {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
+}
+
+.compact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  min-height: 86px;
+  padding: 10px;
+  border: 1px solid #dfe5ed;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.05);
+}
+
+.compact-card.empty {
+  border-color: #fecdca;
+}
+
+.compact-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.compact-main strong,
+.compact-main span,
+.compact-main code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-main strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.compact-main span,
+.compact-main code {
+  color: #667085;
+  font-size: 12px;
+}
+
+.compact-main code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.compact-numbers {
+  display: grid;
+  justify-items: end;
+  min-width: 76px;
+  gap: 2px;
+}
+
+.compact-numbers strong {
+  color: #111827;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.compact-numbers span {
+  max-width: 112px;
+  overflow: hidden;
+  color: #667085;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .time-list {
@@ -703,7 +856,7 @@ dd {
   }
 
   .summary-row {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -724,6 +877,11 @@ dd {
   }
 
   .summary-row {
+    grid-template-columns: 1fr;
+  }
+
+  .price-row,
+  .item-stats {
     grid-template-columns: 1fr;
   }
 

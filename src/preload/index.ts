@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ExportFormat, InventoryMode, RendererApi } from '../shared/types';
+import { CurrencyCode, ExportFormat, InventoryMode, RendererApi } from '../shared/types';
 
 const api: RendererApi = {
   getCurrentInventory: () => ipcRenderer.invoke('inventory:get-current'),
@@ -8,6 +8,8 @@ const api: RendererApi = {
   renameInventory: (newName: string) => ipcRenderer.invoke('inventory:rename', newName),
   submitBarcode: (barcode: string, mode: InventoryMode) => ipcRenderer.invoke('inventory:submit-barcode', barcode, mode),
   updateNickname: (barcode: string, nickname: string) => ipcRenderer.invoke('inventory:update-nickname', barcode, nickname),
+  updatePrice: (barcode: string, priceAmount: number | null, priceCurrency: CurrencyCode) =>
+    ipcRenderer.invoke('inventory:update-price', barcode, priceAmount, priceCurrency),
   refreshLookup: (barcode: string) => ipcRenderer.invoke('inventory:refresh-lookup', barcode),
   exportInventory: (format: ExportFormat) => ipcRenderer.invoke('inventory:export', format),
   getVersion: () => ipcRenderer.invoke('app:get-version'),

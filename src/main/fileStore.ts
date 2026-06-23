@@ -10,6 +10,7 @@ import {
 } from '../shared/types';
 
 const lookupStatuses: LookupStatus[] = ['idle', 'loading', 'found', 'not_found', 'error'];
+const currencyCodes: InventoryItem['priceCurrency'][] = ['JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
 
 export interface StoredSettings {
   lastInventoryPath?: string;
@@ -99,6 +100,8 @@ function migrateItem(barcodeFromKey: string, value: unknown, now: string): Inven
     brand: asString(item.brand, ''),
     category: asString(item.category, ''),
     imageUrl: asString(item.imageUrl, ''),
+    priceAmount: asNullableNonNegativeNumber(item.priceAmount),
+    priceCurrency: asCurrencyCode(item.priceCurrency),
     lookupSource: asLookupSource(item.lookupSource),
     lookupConfidence: asConfidence(item.lookupConfidence),
     quantityOnHand: asNonNegativeInteger(item.quantityOnHand),
@@ -158,4 +161,18 @@ function asConfidence(value: unknown): number {
     return 0;
   }
   return Math.min(1, Math.max(0, value));
+}
+
+function asNullableNonNegativeNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.round(value * 100) / 100);
+}
+
+function asCurrencyCode(value: unknown): InventoryItem['priceCurrency'] {
+  return currencyCodes.includes(value as InventoryItem['priceCurrency']) ? (value as InventoryItem['priceCurrency']) : 'JPY';
 }

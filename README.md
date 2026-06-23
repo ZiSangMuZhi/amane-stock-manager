@@ -19,12 +19,12 @@ npm run package:win
 ## Velopack 打包
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.3
+npm run velopack:pack -- -Version 0.1.4
 powershell -ExecutionPolicy Bypass -File scripts/install-velopack.ps1
 ```
 
 如需让应用内更新按钮可用，打包时提供 HTTPS 更新源：
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.3 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
+npm run velopack:pack -- -Version 0.1.4 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
 ```

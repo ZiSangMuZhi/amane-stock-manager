@@ -28,7 +28,9 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\.-]+)?$') {
 }
 
 if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and [string]::IsNullOrWhiteSpace($UpdateUrl)) {
-  $UpdateUrl = "$($GithubRepoUrl.TrimEnd('/'))/releases/latest/download"
+  $UpdateUrl = "$($GithubRepoUrl.TrimEnd('/'))/releases/latest/download/"
+} elseif (![string]::IsNullOrWhiteSpace($UpdateUrl) -and $UpdateUrl.StartsWith("http", [System.StringComparison]::OrdinalIgnoreCase)) {
+  $UpdateUrl = "$($UpdateUrl.TrimEnd('/'))/"
 }
 
 $env:AMANE_UPDATE_URL = $UpdateUrl

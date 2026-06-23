@@ -4,7 +4,7 @@ const LOOKUP_TIMEOUT_MS = 6500;
 const OPEN_FOOD_FACTS_URL = 'https://world.openfoodfacts.org/api/v3.6/product';
 const UPCITEMDB_URL = 'https://api.upcitemdb.com/prod/trial/lookup';
 const DUCKDUCKGO_HTML_URL = 'https://duckduckgo.com/html/';
-const APP_USER_AGENT = 'AmaneStockManager/0.1.2 (local-desktop-app)';
+const APP_USER_AGENT = 'AmaneStockManager/0.1.3 (local-desktop-app)';
 
 export async function lookupBarcode(barcode: string): Promise<ProductLookupResult> {
   const results = await lookupProviders(barcode);

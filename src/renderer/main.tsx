@@ -81,7 +81,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.7'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.9'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -271,7 +271,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.7'}</span>
+            <span>{version ? `v${version}` : 'v0.1.9'}</span>
           </div>
         </div>
 

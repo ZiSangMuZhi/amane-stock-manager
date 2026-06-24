@@ -1,6 +1,6 @@
 {
   "name": "amane-stock-manager",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "description": "Local barcode-based inventory manager with JSON storage, export, and Velopack updates.",
   "author": "Amane Stock Manager",
   "license": "UNLICENSED",

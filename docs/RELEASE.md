@@ -4,7 +4,7 @@
 
 ```powershell
 npm install
-npm run velopack:pack -- -Version 0.1.7
+npm run velopack:pack -- -Version 0.1.9
 ```
 
 This creates Velopack output in `Releases/`, including `Setup.exe`, full update packages, release indexes, and portable output when supported by Velopack.
@@ -12,7 +12,7 @@ This creates Velopack output in `Releases/`, including `Setup.exe`, full update 
 For local rebuilds of the same version, clean generated release output first:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.7 -CleanOutput
+npm run velopack:pack -- -Version 0.1.9 -CleanOutput
 ```
 
 ## Updates
@@ -20,10 +20,10 @@ npm run velopack:pack -- -Version 0.1.7 -CleanOutput
 Build with an HTTPS update feed:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.7 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
+npm run velopack:pack -- -Version 0.1.9 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
 ```
 
-When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. `-PublishGitHub` uploads the generated Velopack assets to a published GitHub Release.
+When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. The app caches the GitHub release feed and full update package locally before handing the update to Velopack, avoiding direct Velopack directory probes against GitHub. `-PublishGitHub` uploads the generated Velopack assets to a published GitHub Release.
 
 ## Uninstall
 
@@ -55,11 +55,11 @@ msiexec /i AmaneStockManager.msi VELOPACK_INSTALLDIR="D:\Apps\Amane Stock Manage
 To also generate an MSI:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.7 -Msi
+npm run velopack:pack -- -Version 0.1.9 -Msi
 ```
 
 The MSI default scope is `PerUser`. To change it at package time:
 
 ```powershell
-npm run velopack:pack -- -Version 0.1.7 -Msi -InstallScope PerMachine
+npm run velopack:pack -- -Version 0.1.9 -Msi -InstallScope PerMachine
 ```

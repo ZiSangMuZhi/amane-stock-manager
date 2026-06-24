@@ -43,6 +43,8 @@ let currentFilePath: string | null = null;
 let currentInventory: InventoryFile | null = null;
 let pendingUpdate: UpdateInfo | null = null;
 let downloadedUpdate: UpdateInfo | null = null;
+let pendingUpdateSource: string | null = null;
+let downloadedUpdateSource: string | null = null;
 let inventoryWriteQueue: Promise<void> = Promise.resolve();
 const lookupTasks = new Set<string>();
 
@@ -481,10 +483,13 @@ async function checkForUpdates(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = createUpdateManager();
+    const source = await prepareUpdateSource();
+    const manager = createUpdateManager(source);
     const update = await manager.checkForUpdatesAsync();
     pendingUpdate = update;
+    pendingUpdateSource = update ? source : null;
     downloadedUpdate = null;
+    downloadedUpdateSource = null;
 
     if (!update) {
       return {
@@ -515,9 +520,11 @@ async function downloadUpdate(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = createUpdateManager();
+    const source = pendingUpdateSource ?? (await prepareUpdateSource());
+    const manager = createUpdateManager(source);
     if (!pendingUpdate) {
       pendingUpdate = await manager.checkForUpdatesAsync();
+      pendingUpdateSource = pendingUpdate ? source : null;
     }
     if (!pendingUpdate) {
       return {
@@ -526,8 +533,10 @@ async function downloadUpdate(): Promise<UpdateStatus> {
         message: '没有可下载的更新。'
       };
     }
+    await ensureUpdatePackageAvailable(pendingUpdate, pendingUpdateSource ?? source);
     await manager.downloadUpdateAsync(pendingUpdate);
     downloadedUpdate = pendingUpdate;
+    downloadedUpdateSource = pendingUpdateSource ?? source;
     return {
       state: 'downloaded',
       currentVersion: safeCurrentVersion(manager),
@@ -549,7 +558,7 @@ async function applyUpdate(): Promise<UpdateStatus> {
   }
 
   try {
-    const manager = createUpdateManager();
+    const manager = createUpdateManager(downloadedUpdateSource ?? pendingUpdateSource ?? updateUrl);
     const update = downloadedUpdate ?? manager.getUpdatePendingRestart() ?? pendingUpdate;
     if (!update) {
       return {
@@ -571,12 +580,100 @@ async function applyUpdate(): Promise<UpdateStatus> {
   }
 }
 
-function createUpdateManager(): UpdateManager {
-  return new UpdateManager(updateUrl, {
+function createUpdateManager(source: string = updateUrl): UpdateManager {
+  return new UpdateManager(source, {
     AllowVersionDowngrade: false,
     ExplicitChannel: updateChannel,
-    MaximumDeltasBeforeFallback: 10
+    MaximumDeltasBeforeFallback: -1
   });
+}
+
+async function prepareUpdateSource(): Promise<string> {
+  if (!shouldUseGitHubCacheSource()) {
+    return updateUrl;
+  }
+
+  const directory = await getUpdateCacheDirectory();
+  await downloadUpdateAsset(`releases.${updateChannel}.json`, path.join(directory, `releases.${updateChannel}.json`));
+  return directory;
+}
+
+async function ensureUpdatePackageAvailable(update: UpdateInfo, source: string): Promise<void> {
+  if (!isGitHubCacheDirectory(source)) {
+    return;
+  }
+
+  await downloadUpdateAsset(update.TargetFullRelease.FileName, path.join(source, update.TargetFullRelease.FileName), {
+    expectedSize: update.TargetFullRelease.Size
+  });
+}
+
+function shouldUseGitHubCacheSource(): boolean {
+  try {
+    const url = new URL(updateUrl);
+    return (
+      url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'github.com' &&
+      /\/releases\/latest\/download\/?$/i.test(url.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function getUpdateCacheDirectory(): Promise<string> {
+  const directory = path.join(app.getPath('userData'), 'update-cache', updateChannel);
+  await fs.mkdir(directory, { recursive: true });
+  return directory;
+}
+
+function isGitHubCacheDirectory(source: string): boolean {
+  const cacheRoot = path.resolve(app.getPath('userData'), 'update-cache').toLowerCase();
+  const sourcePath = path.resolve(source).toLowerCase();
+  return sourcePath === cacheRoot || sourcePath.startsWith(`${cacheRoot}${path.sep}`);
+}
+
+async function downloadUpdateAsset(
+  fileName: string,
+  destinationPath: string,
+  options: { expectedSize?: number } = {}
+): Promise<void> {
+  const safeFileName = path.basename(fileName);
+  if (safeFileName !== fileName) {
+    throw new Error(`更新资产文件名不安全：${fileName}`);
+  }
+
+  if (options.expectedSize && (await hasExpectedFileSize(destinationPath, options.expectedSize))) {
+    return;
+  }
+
+  const assetUrl = new URL(safeFileName, updateUrl).toString();
+  const response = await fetch(assetUrl, {
+    headers: {
+      'User-Agent': 'AmaneStockManager/0.1.9'
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`无法下载更新资产 ${safeFileName}：HTTP ${response.status}`);
+  }
+
+  const temporaryPath = `${destinationPath}.download`;
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await fs.writeFile(temporaryPath, bytes);
+  if (options.expectedSize && bytes.length !== options.expectedSize) {
+    await fs.rm(temporaryPath, { force: true });
+    throw new Error(`更新资产大小不匹配：${safeFileName}`);
+  }
+  await fs.rename(temporaryPath, destinationPath);
+}
+
+async function hasExpectedFileSize(filePath: string, expectedSize: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.size === expectedSize;
+  } catch {
+    return false;
+  }
 }
 
 function safeCurrentVersion(manager: UpdateManager): string {

@@ -29,6 +29,7 @@ export function createInventory(inventoryName: string, createdAt = nowIso()): In
 export function createInventoryItem(barcode: string, timestamp = nowIso()): InventoryItem {
   return {
     barcode,
+    sortIndex: 0,
     nickname: '',
     lookupName: '',
     brand: '',
@@ -80,6 +81,9 @@ export function submitBarcode(
 
   const next = cloneInventory(inventory);
   const item = next.items[barcode] ?? createInventoryItem(barcode, timestamp);
+  if (!next.items[barcode]) {
+    item.sortIndex = nextTopSortIndex(next);
+  }
 
   if (mode === 'in') {
     item.quantityOnHand += 1;
@@ -122,7 +126,10 @@ export function updateNickname(
 ): InventoryFile {
   const barcode = normalizeBarcode(rawBarcode);
   const next = cloneInventory(inventory);
-  const item = next.items[barcode] ?? createInventoryItem(barcode, timestamp);
+  const item = next.items[barcode];
+  if (!item) {
+    return inventory;
+  }
   item.nickname = nickname.trim();
   item.updatedAt = timestamp;
   next.items[barcode] = item;
@@ -139,7 +146,10 @@ export function updatePrice(
 ): InventoryFile {
   const barcode = normalizeBarcode(rawBarcode);
   const next = cloneInventory(inventory);
-  const item = next.items[barcode] ?? createInventoryItem(barcode, timestamp);
+  const item = next.items[barcode];
+  if (!item) {
+    return inventory;
+  }
   item.priceAmount = normalizePriceAmount(priceAmount);
   item.priceCurrency = priceCurrency;
   item.updatedAt = timestamp;
@@ -165,13 +175,38 @@ export function deleteInventoryItem(
   return next;
 }
 
+export function updateSortOrder(
+  inventory: InventoryFile,
+  orderedBarcodes: string[],
+  timestamp = nowIso()
+): InventoryFile {
+  const next = cloneInventory(inventory);
+  const uniqueOrdered = [...new Set(orderedBarcodes.map(normalizeBarcode))].filter((barcode) => barcode in next.items);
+  const remaining = Object.values(next.items)
+    .filter((item) => !uniqueOrdered.includes(item.barcode))
+    .sort((a, b) => compareSortIndex(a, b))
+    .map((item) => item.barcode);
+
+  [...uniqueOrdered, ...remaining].forEach((barcode, index) => {
+    const item = next.items[barcode];
+    if (item) {
+      item.sortIndex = index;
+    }
+  });
+  next.updatedAt = timestamp;
+  return next;
+}
+
 export function applyLookupResult(
   inventory: InventoryFile,
   lookup: ProductLookupResult
 ): InventoryFile {
   const next = cloneInventory(inventory);
   const timestamp = lookup.lookedUpAt;
-  const item = next.items[lookup.barcode] ?? createInventoryItem(lookup.barcode, timestamp);
+  const item = next.items[lookup.barcode];
+  if (!item) {
+    return inventory;
+  }
 
   item.lookupStatus = lookup.status;
   item.lookupUpdatedAt = timestamp;
@@ -216,4 +251,16 @@ function normalizePriceAmount(value: number | null): number | null {
     return null;
   }
   return Math.max(0, Math.round(value * 100) / 100);
+}
+
+function nextTopSortIndex(inventory: InventoryFile): number {
+  const indexes = Object.values(inventory.items).map((item) => item.sortIndex).filter(Number.isFinite);
+  return indexes.length === 0 ? 0 : Math.min(...indexes) - 1;
+}
+
+function compareSortIndex(a: InventoryItem, b: InventoryItem): number {
+  if (a.sortIndex !== b.sortIndex) {
+    return a.sortIndex - b.sortIndex;
+  }
+  return a.barcode.localeCompare(b.barcode);
 }

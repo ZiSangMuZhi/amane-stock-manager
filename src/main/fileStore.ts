@@ -73,9 +73,12 @@ function migrateInventory(value: unknown, fallbackName: string): InventoryFile {
 
   const now = new Date().toISOString();
   const rawItems = isObject(value.items) ? value.items : {};
-  const items = Object.fromEntries(
-    Object.entries(rawItems).map(([barcode, item]) => [barcode, migrateItem(barcode, item, now)])
-  );
+  const migratedItems = Object.entries(rawItems).map(([barcode, item]) => migrateItem(barcode, item, now));
+  const hasStoredSort = migratedItems.some((item) => item.sortIndex !== Number.MAX_SAFE_INTEGER);
+  const orderedItems = hasStoredSort
+    ? migratedItems.sort(compareItemSort)
+    : migratedItems.sort(compareLegacyItemOrder).map((item, index) => ({ ...item, sortIndex: index }));
+  const items = Object.fromEntries(orderedItems.map((item) => [item.barcode, item]));
   const rawTransactions = Array.isArray(value.transactions) ? value.transactions : [];
 
   return {
@@ -95,6 +98,7 @@ function migrateItem(barcodeFromKey: string, value: unknown, now: string): Inven
 
   return {
     barcode,
+    sortIndex: asSortIndex(item.sortIndex),
     nickname: asString(item.nickname, ''),
     lookupName: asString(item.lookupName, ''),
     brand: asString(item.brand, ''),
@@ -150,6 +154,35 @@ function asNonNegativeInteger(value: unknown): number {
     return 0;
   }
   return Math.max(0, Math.trunc(value));
+}
+
+function asSortIndex(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return value;
+}
+
+function compareItemSort(a: InventoryItem, b: InventoryItem): number {
+  if (a.sortIndex !== b.sortIndex) {
+    return a.sortIndex - b.sortIndex;
+  }
+  return a.barcode.localeCompare(b.barcode);
+}
+
+function compareLegacyItemOrder(a: InventoryItem, b: InventoryItem): number {
+  const operationDiff = recentOperationTime(b) - recentOperationTime(a);
+  if (operationDiff !== 0) {
+    return operationDiff;
+  }
+  if (b.quantityOnHand !== a.quantityOnHand) {
+    return b.quantityOnHand - a.quantityOnHand;
+  }
+  return a.barcode.localeCompare(b.barcode);
+}
+
+function recentOperationTime(item: InventoryItem): number {
+  return Math.max(Date.parse(item.lastInAt ?? '') || 0, Date.parse(item.lastOutAt ?? '') || 0);
 }
 
 function asLookupSource(value: unknown): InventoryItem['lookupSource'] {

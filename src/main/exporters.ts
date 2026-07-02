@@ -4,6 +4,7 @@ import { ExportFormat, InventoryFile, InventoryItem } from '../shared/types';
 
 const ITEM_HEADERS = [
   'barcode',
+  'sortIndex',
   'nickname',
   'lookupName',
   'brand',
@@ -65,6 +66,7 @@ export function defaultExportName(inventoryName: string, format: ExportFormat): 
 function itemRows(inventory: InventoryFile): Array<Record<string, string | number>> {
   return sortedItems(inventory).map((item) => ({
     barcode: item.barcode,
+    sortIndex: item.sortIndex,
     nickname: item.nickname,
     lookupName: item.lookupName,
     brand: item.brand,
@@ -132,8 +134,8 @@ function escapeCsvValue(value: string | number): string {
 
 function sortedItems(inventory: InventoryFile): InventoryItem[] {
   return Object.values(inventory.items).sort((a, b) => {
-    if (b.quantityOnHand !== a.quantityOnHand) {
-      return b.quantityOnHand - a.quantityOnHand;
+    if (a.sortIndex !== b.sortIndex) {
+      return a.sortIndex - b.sortIndex;
     }
     return a.barcode.localeCompare(b.barcode);
   });

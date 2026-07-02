@@ -11,7 +11,8 @@ import {
   submitBarcode,
   toSubmitResult,
   updateNickname,
-  updatePrice
+  updatePrice,
+  updateSortOrder
 } from '../shared/inventoryLogic';
 import { ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
 import {
@@ -311,9 +312,21 @@ function registerIpcHandlers(): void {
     });
   });
 
+  ipcMain.handle('inventory:update-sort-order', async (_event, orderedBarcodes: string[]) => {
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      currentInventory = updateSortOrder(inventory, orderedBarcodes);
+      await saveCurrentInventory();
+      return currentDocument();
+    });
+  });
+
   ipcMain.handle('inventory:delete-item', async (_event, barcode: string) => {
     return queueInventoryWrite(async () => {
       const inventory = requireInventory();
+      if (currentFilePath) {
+        lookupTasks.delete(lookupTaskKey(normalizeBarcode(barcode), currentFilePath));
+      }
       currentInventory = deleteInventoryItem(inventory, barcode);
       await saveCurrentInventory();
       return currentDocument();
@@ -650,7 +663,7 @@ async function downloadUpdateAsset(
   const assetUrl = new URL(safeFileName, updateUrl).toString();
   const response = await fetch(assetUrl, {
     headers: {
-      'User-Agent': 'AmaneStockManager/0.1.9'
+      'User-Agent': 'AmaneStockManager/0.1.10'
     }
   });
   if (!response.ok) {

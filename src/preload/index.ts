@@ -10,6 +10,7 @@ const api: RendererApi = {
   updateNickname: (barcode: string, nickname: string) => ipcRenderer.invoke('inventory:update-nickname', barcode, nickname),
   updatePrice: (barcode: string, priceAmount: number | null, priceCurrency: CurrencyCode) =>
     ipcRenderer.invoke('inventory:update-price', barcode, priceAmount, priceCurrency),
+  updateSortOrder: (orderedBarcodes: string[]) => ipcRenderer.invoke('inventory:update-sort-order', orderedBarcodes),
   deleteItem: (barcode: string) => ipcRenderer.invoke('inventory:delete-item', barcode),
   refreshLookup: (barcode: string) => ipcRenderer.invoke('inventory:refresh-lookup', barcode),
   exportInventory: (format: ExportFormat) => ipcRenderer.invoke('inventory:export', format),

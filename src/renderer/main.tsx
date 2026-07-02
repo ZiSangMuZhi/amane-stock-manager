@@ -1,6 +1,8 @@
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
   BadgeCheck,
   Barcode,
   Boxes,
@@ -10,6 +12,7 @@ import {
   FileJson,
   FilePlus2,
   FolderOpen,
+  GripVertical,
   PackageCheck,
   PackageMinus,
   PackageOpen,
@@ -19,6 +22,7 @@ import {
   RefreshCw,
   Save,
   ScanBarcode,
+  Search,
   SearchX,
   Sheet,
   Trash2,
@@ -41,9 +45,14 @@ import {
 type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
 type ViewMode = 'standard' | 'compact';
 type PriceDraft = { amount: string; currency: CurrencyCode };
+type SortPreset = 'name' | 'price' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
 
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
 const currencyOptions: CurrencyCode[] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
+const nameCollator = new Intl.Collator(['zh-Hans-CN', 'zh-CN', 'ja-JP', 'en-US'], {
+  numeric: true,
+  sensitivity: 'base'
+});
 
 function App(): JSX.Element {
   const [document, setDocument] = useState<InventoryDocument>(emptyDocument);
@@ -57,14 +66,17 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [draggingBarcode, setDraggingBarcode] = useState<string | null>(null);
   const [version, setVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
 
   const inventory = document.inventory;
-  const items = useMemo(() => sortItems(Object.values(inventory?.items ?? {})), [inventory]);
+  const orderedItems = useMemo(() => sortItems(Object.values(inventory?.items ?? {})), [inventory]);
+  const visibleItems = useMemo(() => filterItems(orderedItems, searchQuery), [orderedItems, searchQuery]);
   const totals = useMemo(() => {
-    return items.reduce(
+    return orderedItems.reduce(
       (acc, item) => {
         acc.quantity += item.quantityOnHand;
         acc.in += item.totalIn;
@@ -77,22 +89,22 @@ function App(): JSX.Element {
       },
       { quantity: 0, in: 0, out: 0, valueByCurrency: {} as Partial<Record<CurrencyCode, number>> }
     );
-  }, [items]);
+  }, [orderedItems]);
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.9'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.10'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
   }, []);
 
   useEffect(() => {
-    const nextDrafts = Object.fromEntries(items.map((item) => [item.barcode, item.nickname]));
+    const nextDrafts = Object.fromEntries(orderedItems.map((item) => [item.barcode, item.nickname]));
     setNicknameDrafts(nextDrafts);
     setPriceDrafts(
       Object.fromEntries(
-        items.map((item) => [
+        orderedItems.map((item) => [
           item.barcode,
           {
             amount: item.priceAmount === null ? '' : String(item.priceAmount),
@@ -101,7 +113,7 @@ function App(): JSX.Element {
         ])
       )
     );
-  }, [items]);
+  }, [orderedItems]);
 
   useEffect(() => {
     barcodeInputRef.current?.focus();
@@ -230,7 +242,59 @@ function App(): JSX.Element {
 
     await runAction(() => window.amaneStock.deleteItem(item.barcode), (next) => {
       setDocument(next);
+      setNicknameDrafts((drafts) => omitKey(drafts, item.barcode));
+      setPriceDrafts((drafts) => omitKey(drafts, item.barcode));
       setNotice({ type: 'success', text: '品类已删除。' });
+    });
+  }
+
+  async function handleSortPreset(preset: SortPreset): Promise<void> {
+    if (!inventory) {
+      return;
+    }
+    const nextOrder = [...orderedItems].sort((a, b) => compareByPreset(a, b, preset)).map((item) => item.barcode);
+    await saveSortOrder(nextOrder, '排序已保存。');
+  }
+
+  function handleDragStart(event: React.DragEvent<HTMLElement>, item: InventoryItem): void {
+    setDraggingBarcode(item.barcode);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', item.barcode);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLElement>, target: InventoryItem): Promise<void> {
+    event.preventDefault();
+    const draggedBarcode = event.dataTransfer.getData('text/plain') || draggingBarcode;
+    setDraggingBarcode(null);
+    if (!draggedBarcode || draggedBarcode === target.barcode) {
+      return;
+    }
+
+    const visibleBarcodes = visibleItems.map((item) => item.barcode);
+    if (!visibleBarcodes.includes(draggedBarcode) || !visibleBarcodes.includes(target.barcode)) {
+      return;
+    }
+
+    const reorderedVisible = moveBefore(visibleBarcodes, draggedBarcode, target.barcode);
+    const visibleSet = new Set(visibleBarcodes);
+    const visibleQueue = [...reorderedVisible];
+    const nextOrder = orderedItems.map((item) => (visibleSet.has(item.barcode) ? visibleQueue.shift() ?? item.barcode : item.barcode));
+    await saveSortOrder(nextOrder, '顺序已保存。');
+  }
+
+  function handleDragEnd(): void {
+    setDraggingBarcode(null);
+  }
+
+  async function saveSortOrder(orderedBarcodes: string[], message: string): Promise<void> {
+    await runAction(() => window.amaneStock.updateSortOrder(orderedBarcodes), (next) => {
+      setDocument(next);
+      setNotice({ type: 'success', text: message });
     });
   }
 
@@ -271,7 +335,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.9'}</span>
+            <span>{version ? `v${version}` : 'v0.1.10'}</span>
           </div>
         </div>
 
@@ -442,16 +506,81 @@ function App(): JSX.Element {
         )}
 
         {inventory && (
+          <section className="inventory-tools" aria-label="商品检索和排序">
+            <label className="search-field">
+              <Search size={17} />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="搜索名称、条码、品牌、分类"
+                autoComplete="off"
+              />
+              {searchQuery && (
+                <button type="button" onClick={() => setSearchQuery('')} aria-label="清空搜索">
+                  <X size={15} />
+                </button>
+              )}
+            </label>
+            <div className="sort-bar" aria-label="排序">
+              <button type="button" onClick={() => handleSortPreset('name')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownAZ size={16} />
+                <span>名称</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('price')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>单价</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('stock')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>库存</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('totalIn')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>录入</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('totalOut')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>出库</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('recent')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>最近</span>
+              </button>
+            </div>
+            <span className="result-count">
+              {visibleItems.length}/{orderedItems.length}
+            </span>
+          </section>
+        )}
+
+        {inventory && (
           <section className={`inventory-grid ${viewMode === 'compact' ? 'compact-grid' : ''}`} aria-label="库存商品">
-            {items.length === 0 ? (
+            {orderedItems.length === 0 ? (
               <div className="empty-grid">
                 <ScanBarcode size={36} />
                 <span>暂无商品</span>
               </div>
+            ) : visibleItems.length === 0 ? (
+              <div className="empty-grid">
+                <SearchX size={36} />
+                <span>没有匹配商品</span>
+              </div>
             ) : (
-              items.map((item) =>
+              visibleItems.map((item) =>
                 viewMode === 'compact' ? (
-                  <article className={`compact-card ${item.quantityOnHand === 0 ? 'empty' : ''}`} key={item.barcode}>
+                  <article
+                    className={`compact-card ${item.quantityOnHand === 0 ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                    key={item.barcode}
+                    draggable={!busy}
+                    onDragStart={(event) => handleDragStart(event, item)}
+                    onDragOver={handleDragOver}
+                    onDrop={(event) => handleDrop(event, item)}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <span className="drag-handle" title="拖动排序">
+                      <GripVertical size={16} />
+                    </span>
                     <ProductThumb item={item} />
                     <div className="compact-main">
                       <strong>{item.nickname || item.lookupName || item.barcode}</strong>
@@ -474,8 +603,19 @@ function App(): JSX.Element {
                     </div>
                   </article>
                 ) : (
-                <article className={`item-card ${item.quantityOnHand === 0 ? 'empty' : ''}`} key={item.barcode}>
+                <article
+                  className={`item-card ${item.quantityOnHand === 0 ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                  key={item.barcode}
+                  draggable={!busy}
+                  onDragStart={(event) => handleDragStart(event, item)}
+                  onDragOver={handleDragOver}
+                  onDrop={(event) => handleDrop(event, item)}
+                  onDragEnd={handleDragEnd}
+                >
                   <div className="item-head">
+                    <span className="drag-handle" title="拖动排序">
+                      <GripVertical size={17} />
+                    </span>
                     <ProductThumb item={item} />
                     <div className="item-title">
                       <h2>{item.nickname || item.lookupName || item.barcode}</h2>
@@ -702,19 +842,90 @@ function noticeIcon(type: Notice['type']): JSX.Element {
 
 function sortItems(items: InventoryItem[]): InventoryItem[] {
   return [...items].sort((a, b) => {
-    const recentOperationDiff = recentOperationTime(b) - recentOperationTime(a);
-    if (recentOperationDiff !== 0) {
-      return recentOperationDiff;
-    }
-    if (b.quantityOnHand !== a.quantityOnHand) {
-      return b.quantityOnHand - a.quantityOnHand;
+    if (a.sortIndex !== b.sortIndex) {
+      return a.sortIndex - b.sortIndex;
     }
     return a.barcode.localeCompare(b.barcode);
   });
 }
 
+function filterItems(items: InventoryItem[], query: string): InventoryItem[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return items;
+  }
+  return items.filter((item) => {
+    const haystack = [
+      item.barcode,
+      item.nickname,
+      item.lookupName,
+      item.brand,
+      item.category,
+      item.priceCurrency,
+      item.priceAmount === null ? '' : String(item.priceAmount)
+    ]
+      .join(' ')
+      .toLowerCase();
+    return haystack.includes(normalized);
+  });
+}
+
+function compareByPreset(a: InventoryItem, b: InventoryItem, preset: SortPreset): number {
+  if (preset === 'name') {
+    return nameCollator.compare(displayName(a), displayName(b)) || compareManualOrder(a, b);
+  }
+  if (preset === 'price') {
+    return comparePriceDescending(a, b) || compareManualOrder(a, b);
+  }
+  if (preset === 'stock') {
+    return b.quantityOnHand - a.quantityOnHand || compareManualOrder(a, b);
+  }
+  if (preset === 'totalIn') {
+    return b.totalIn - a.totalIn || compareManualOrder(a, b);
+  }
+  if (preset === 'totalOut') {
+    return b.totalOut - a.totalOut || compareManualOrder(a, b);
+  }
+  return recentOperationTime(b) - recentOperationTime(a) || compareManualOrder(a, b);
+}
+
+function displayName(item: InventoryItem): string {
+  return item.nickname || item.lookupName || item.barcode;
+}
+
+function comparePriceDescending(a: InventoryItem, b: InventoryItem): number {
+  if (a.priceAmount === null && b.priceAmount === null) {
+    return 0;
+  }
+  if (a.priceAmount === null) {
+    return 1;
+  }
+  if (b.priceAmount === null) {
+    return -1;
+  }
+  return b.priceAmount - a.priceAmount;
+}
+
+function compareManualOrder(a: InventoryItem, b: InventoryItem): number {
+  return a.sortIndex - b.sortIndex || a.barcode.localeCompare(b.barcode);
+}
+
 function recentOperationTime(item: InventoryItem): number {
   return Math.max(Date.parse(item.lastInAt ?? '') || 0, Date.parse(item.lastOutAt ?? '') || 0);
+}
+
+function moveBefore(items: string[], moving: string, target: string): string[] {
+  const withoutMoving = items.filter((item) => item !== moving);
+  const targetIndex = withoutMoving.indexOf(target);
+  if (targetIndex === -1) {
+    return items;
+  }
+  return [...withoutMoving.slice(0, targetIndex), moving, ...withoutMoving.slice(targetIndex)];
+}
+
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const { [key]: _removed, ...rest } = record;
+  return rest;
 }
 
 function formatTime(value: string | null): string {

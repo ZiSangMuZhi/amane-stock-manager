@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { createInventory, deleteInventoryItem, submitBarcode, updateNickname, updatePrice } from '../src/shared/inventoryLogic';
+import {
+  createInventory,
+  deleteInventoryItem,
+  submitBarcode,
+  updateNickname,
+  updatePrice,
+  updateSortOrder
+} from '../src/shared/inventoryLogic';
 
 describe('inventory logic', () => {
   it('records barcode intake and aggregates stock', () => {
@@ -20,7 +27,8 @@ describe('inventory logic', () => {
   });
 
   it('keeps utf-8 nicknames as user data', () => {
-    const inventory = updateNickname(createInventory('Stock'), 'abc', '中文 / 日本語 / English');
+    const stocked = submitBarcode(createInventory('Stock'), 'abc', 'in');
+    const inventory = updateNickname(stocked.inventory, 'abc', '中文 / 日本語 / English');
 
     expect(inventory.items.abc?.nickname).toBe('中文 / 日本語 / English');
   });
@@ -39,5 +47,25 @@ describe('inventory logic', () => {
 
     expect(removed.items['4573102661449']).toBeUndefined();
     expect(removed.transactions).toHaveLength(0);
+  });
+
+  it('does not recreate a deleted item from stale field saves', () => {
+    const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
+    const removed = deleteInventoryItem(stocked.inventory, '4573102661449', '2026-06-23T12:01:00.000Z');
+    const priced = updatePrice(removed, '4573102661449', 25, 'CAD', '2026-06-23T12:02:00.000Z');
+    const renamed = updateNickname(priced, '4573102661449', 'stale blur', '2026-06-23T12:03:00.000Z');
+
+    expect(renamed.items['4573102661449']).toBeUndefined();
+  });
+
+  it('keeps manual item sort order and places new scans first', () => {
+    const first = submitBarcode(createInventory('Gunpla'), 'A', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
+    const second = submitBarcode(first.inventory, 'B', 'in', '2026-06-23T12:01:00.000Z', () => 'tx-2');
+    const manual = updateSortOrder(second.inventory, ['A', 'B'], '2026-06-23T12:02:00.000Z');
+    const third = submitBarcode(manual, 'C', 'in', '2026-06-23T12:03:00.000Z', () => 'tx-3');
+
+    expect(third.inventory.items.C?.sortIndex).toBeLessThan(third.inventory.items.A?.sortIndex ?? 0);
+    expect(manual.items.A?.sortIndex).toBe(0);
+    expect(manual.items.B?.sortIndex).toBe(1);
   });
 });

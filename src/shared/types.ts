@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export type InventoryMode = 'in' | 'out';
 export type LookupStatus = 'idle' | 'loading' | 'found' | 'not_found' | 'error';
@@ -8,6 +8,7 @@ export type CurrencyCode = 'CAD' | 'JPY' | 'USD' | 'CNY' | 'EUR' | 'GBP' | 'TWD'
 
 export interface InventoryItem {
   barcode: string;
+  sortIndex: number;
   nickname: string;
   lookupName: string;
   brand: string;
@@ -97,6 +98,7 @@ export interface RendererApi {
   submitBarcode(barcode: string, mode: InventoryMode): Promise<SubmitBarcodeResult>;
   updateNickname(barcode: string, nickname: string): Promise<InventoryDocument>;
   updatePrice(barcode: string, priceAmount: number | null, priceCurrency: CurrencyCode): Promise<InventoryDocument>;
+  updateSortOrder(orderedBarcodes: string[]): Promise<InventoryDocument>;
   deleteItem(barcode: string): Promise<InventoryDocument>;
   refreshLookup(barcode: string): Promise<SubmitBarcodeResult>;
   exportInventory(format: ExportFormat): Promise<ExportResult>;

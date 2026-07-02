@@ -105,6 +105,7 @@ function migrateItem(barcodeFromKey: string, value: unknown, now: string): Inven
     category: asString(item.category, ''),
     imageUrl: asString(item.imageUrl, ''),
     priceAmount: asNullableNonNegativeNumber(item.priceAmount),
+    salePriceAmount: asNullableNonNegativeNumber(item.salePriceAmount),
     priceCurrency: asCurrencyCode(item.priceCurrency),
     lookupSource: asLookupSource(item.lookupSource),
     lookupConfidence: asConfidence(item.lookupConfidence),

@@ -32,7 +32,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -286,8 +287,9 @@ button:disabled {
 
 .summary-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(92px, 1fr));
+  grid-template-columns: repeat(6, minmax(88px, 1fr));
   gap: 8px;
+  min-width: 0;
 }
 
 .metric {
@@ -443,7 +445,7 @@ button:disabled {
 
 .inventory-tools {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
   gap: 10px;
   align-items: center;
   min-width: 0;
@@ -483,6 +485,36 @@ button:disabled {
   color: #667085;
   background: #f2f4f7;
   cursor: pointer;
+}
+
+.privacy-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid #cdd5df;
+  border-radius: 8px;
+  color: #344054;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.privacy-toggle.active {
+  color: #175cd3;
+  border-color: #b2ddff;
+  background: #eff8ff;
+}
+
+.privacy-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .sort-bar {
@@ -687,7 +719,7 @@ button:disabled {
 
 .price-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px minmax(96px, 0.72fr);
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 8px;
   align-items: end;
   min-width: 0;
@@ -716,6 +748,11 @@ button:disabled {
   padding: 6px 9px;
   border-radius: 8px;
   background: #f8fafc;
+}
+
+.value-field.hidden-price {
+  color: #667085;
+  background: #f2f4f7;
 }
 
 .value-field strong {
@@ -855,7 +892,7 @@ button:disabled {
 .compact-numbers {
   display: grid;
   justify-items: end;
-  min-width: 76px;
+  min-width: 92px;
   gap: 2px;
 }
 
@@ -866,7 +903,7 @@ button:disabled {
 }
 
 .compact-numbers span {
-  max-width: 112px;
+  max-width: 138px;
   overflow: hidden;
   color: #667085;
   font-size: 12px;

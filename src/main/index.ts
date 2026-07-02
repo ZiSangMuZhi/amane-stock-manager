@@ -14,7 +14,7 @@ import {
   updatePrice,
   updateSortOrder
 } from '../shared/inventoryLogic';
-import { ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
+import { CurrencyCode, ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
 import {
   createInventoryFile,
   normalizeJsonPath,
@@ -303,14 +303,23 @@ function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle('inventory:update-price', async (_event, barcode: string, priceAmount: number | null, priceCurrency) => {
-    return queueInventoryWrite(async () => {
-      const inventory = requireInventory();
-      currentInventory = updatePrice(inventory, barcode, priceAmount, priceCurrency);
-      await saveCurrentInventory();
-      return currentDocument();
-    });
-  });
+  ipcMain.handle(
+    'inventory:update-price',
+    async (
+      _event,
+      barcode: string,
+      purchasePriceAmount: number | null,
+      salePriceAmount: number | null,
+      priceCurrency: CurrencyCode
+    ) => {
+      return queueInventoryWrite(async () => {
+        const inventory = requireInventory();
+        currentInventory = updatePrice(inventory, barcode, purchasePriceAmount, salePriceAmount, priceCurrency);
+        await saveCurrentInventory();
+        return currentDocument();
+      });
+    }
+  );
 
   ipcMain.handle('inventory:update-sort-order', async (_event, orderedBarcodes: string[]) => {
     return queueInventoryWrite(async () => {
@@ -663,7 +672,7 @@ async function downloadUpdateAsset(
   const assetUrl = new URL(safeFileName, updateUrl).toString();
   const response = await fetch(assetUrl, {
     headers: {
-      'User-Agent': 'AmaneStockManager/0.1.10'
+      'User-Agent': 'AmaneStockManager/0.1.11'
     }
   });
   if (!response.ok) {

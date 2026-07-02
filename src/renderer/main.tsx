@@ -9,6 +9,8 @@ import {
   CheckCircle2,
   CircleAlert,
   Download,
+  Eye,
+  EyeOff,
   FileJson,
   FilePlus2,
   FolderOpen,
@@ -44,8 +46,9 @@ import {
 
 type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
 type ViewMode = 'standard' | 'compact';
-type PriceDraft = { amount: string; currency: CurrencyCode };
-type SortPreset = 'name' | 'price' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
+type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: CurrencyCode };
+type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
+type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
 
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
 const currencyOptions: CurrencyCode[] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
@@ -66,6 +69,7 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
+  const [hidePurchasePrice, setHidePurchasePrice] = useState(() => localStorage.getItem('amane-hide-purchase-price') === '1');
   const [searchQuery, setSearchQuery] = useState('');
   const [draggingBarcode, setDraggingBarcode] = useState<string | null>(null);
   const [version, setVersion] = useState('');
@@ -82,22 +86,42 @@ function App(): JSX.Element {
         acc.in += item.totalIn;
         acc.out += item.totalOut;
         if (item.priceAmount !== null && item.quantityOnHand > 0) {
-          acc.valueByCurrency[item.priceCurrency] =
-            (acc.valueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * item.quantityOnHand;
+          acc.purchaseValueByCurrency[item.priceCurrency] =
+            (acc.purchaseValueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * item.quantityOnHand;
+        }
+        if (item.salePriceAmount !== null && item.quantityOnHand > 0) {
+          acc.saleValueByCurrency[item.priceCurrency] =
+            (acc.saleValueByCurrency[item.priceCurrency] ?? 0) + item.salePriceAmount * item.quantityOnHand;
+        }
+        if (item.priceAmount !== null && item.salePriceAmount !== null && item.quantityOnHand > 0) {
+          acc.grossProfitByCurrency[item.priceCurrency] =
+            (acc.grossProfitByCurrency[item.priceCurrency] ?? 0) +
+            (item.salePriceAmount - item.priceAmount) * item.quantityOnHand;
         }
         return acc;
       },
-      { quantity: 0, in: 0, out: 0, valueByCurrency: {} as Partial<Record<CurrencyCode, number>> }
+      {
+        quantity: 0,
+        in: 0,
+        out: 0,
+        purchaseValueByCurrency: {} as ValueByCurrency,
+        saleValueByCurrency: {} as ValueByCurrency,
+        grossProfitByCurrency: {} as ValueByCurrency
+      }
     );
   }, [orderedItems]);
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.10'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.11'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('amane-hide-purchase-price', hidePurchasePrice ? '1' : '0');
+  }, [hidePurchasePrice]);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(orderedItems.map((item) => [item.barcode, item.nickname]));
@@ -107,7 +131,8 @@ function App(): JSX.Element {
         orderedItems.map((item) => [
           item.barcode,
           {
-            amount: item.priceAmount === null ? '' : String(item.priceAmount),
+            purchaseAmount: item.priceAmount === null ? '' : String(item.priceAmount),
+            saleAmount: item.salePriceAmount === null ? '' : String(item.salePriceAmount),
             currency: item.priceCurrency
           }
         ])
@@ -134,6 +159,13 @@ function App(): JSX.Element {
 
   function showError(error: unknown): void {
     setNotice({ type: 'error', text: error instanceof Error ? error.message : String(error) });
+  }
+
+  function updatePriceDraft(item: InventoryItem, patch: Partial<PriceDraft>): void {
+    setPriceDrafts((drafts) => ({
+      ...drafts,
+      [item.barcode]: { ...priceDraftFromItem(item), ...drafts[item.barcode], ...patch }
+    }));
   }
 
   async function handleCreate(): Promise<void> {
@@ -204,27 +236,37 @@ function App(): JSX.Element {
   }
 
   async function handlePriceBlur(item: InventoryItem): Promise<void> {
-    const draft = priceDrafts[item.barcode] ?? { amount: '', currency: item.priceCurrency };
-    const parsed = parsePrice(draft.amount);
-    if (parsed === item.priceAmount && draft.currency === item.priceCurrency) {
+    const draft = priceDrafts[item.barcode] ?? priceDraftFromItem(item);
+    const purchasePrice = parsePrice(draft.purchaseAmount);
+    const salePrice = parsePrice(draft.saleAmount);
+    if (purchasePrice === item.priceAmount && salePrice === item.salePriceAmount && draft.currency === item.priceCurrency) {
       return;
     }
 
-    await runAction(() => window.amaneStock.updatePrice(item.barcode, parsed, draft.currency), (next) => {
+    await runAction(() => window.amaneStock.updatePrice(item.barcode, purchasePrice, salePrice, draft.currency), (next) => {
       setDocument(next);
       setNotice({ type: 'success', text: '价格已保存。' });
     });
   }
 
   async function handleCurrencyChange(item: InventoryItem, currency: CurrencyCode): Promise<void> {
-    const draft = priceDrafts[item.barcode] ?? { amount: '', currency: item.priceCurrency };
+    const draft = priceDrafts[item.barcode] ?? priceDraftFromItem(item);
     const nextDraft = { ...draft, currency };
     setPriceDrafts((drafts) => ({ ...drafts, [item.barcode]: nextDraft }));
 
-    await runAction(() => window.amaneStock.updatePrice(item.barcode, parsePrice(nextDraft.amount), currency), (next) => {
-      setDocument(next);
-      setNotice({ type: 'success', text: '货币单位已保存。' });
-    });
+    await runAction(
+      () =>
+        window.amaneStock.updatePrice(
+          item.barcode,
+          parsePrice(nextDraft.purchaseAmount),
+          parsePrice(nextDraft.saleAmount),
+          currency
+        ),
+      (next) => {
+        setDocument(next);
+        setNotice({ type: 'success', text: '货币单位已保存。' });
+      }
+    );
   }
 
   async function handleRefreshLookup(item: InventoryItem): Promise<void> {
@@ -335,7 +377,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.10'}</span>
+            <span>{version ? `v${version}` : 'v0.1.11'}</span>
           </div>
         </div>
 
@@ -436,7 +478,17 @@ function App(): JSX.Element {
             <Metric label="当前库存" value={totals.quantity} icon={<PackageCheck size={18} />} />
             <Metric label="累计录入" value={totals.in} icon={<PackagePlus size={18} />} />
             <Metric label="累计出库" value={totals.out} icon={<PackageMinus size={18} />} />
-            <Metric label="库存估值" value={formatValueSummary(totals.valueByCurrency)} icon={<Download size={18} />} />
+            <Metric
+              label="库存成本"
+              value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.purchaseValueByCurrency)}
+              icon={hidePurchasePrice ? <EyeOff size={18} /> : <Download size={18} />}
+            />
+            <Metric label="售价估值" value={formatValueSummary(totals.saleValueByCurrency)} icon={<BadgeCheck size={18} />} />
+            <Metric
+              label="毛利估算"
+              value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.grossProfitByCurrency, false)}
+              icon={<ArrowDownWideNarrow size={18} />}
+            />
           </div>
         </section>
 
@@ -522,14 +574,31 @@ function App(): JSX.Element {
                 </button>
               )}
             </label>
+            <label className={`privacy-toggle ${hidePurchasePrice ? 'active' : ''}`}>
+              <input
+                type="checkbox"
+                checked={hidePurchasePrice}
+                onChange={(event) => setHidePurchasePrice(event.target.checked)}
+              />
+              {hidePurchasePrice ? <EyeOff size={16} /> : <Eye size={16} />}
+              <span>隐藏进价</span>
+            </label>
             <div className="sort-bar" aria-label="排序">
               <button type="button" onClick={() => handleSortPreset('name')} disabled={busy || orderedItems.length < 2}>
                 <ArrowDownAZ size={16} />
                 <span>名称</span>
               </button>
-              <button type="button" onClick={() => handleSortPreset('price')} disabled={busy || orderedItems.length < 2}>
+              <button
+                type="button"
+                onClick={() => handleSortPreset('purchasePrice')}
+                disabled={busy || orderedItems.length < 2 || hidePurchasePrice}
+              >
                 <ArrowDownWideNarrow size={16} />
-                <span>单价</span>
+                <span>进价</span>
+              </button>
+              <button type="button" onClick={() => handleSortPreset('salePrice')} disabled={busy || orderedItems.length < 2}>
+                <ArrowDownWideNarrow size={16} />
+                <span>售价</span>
               </button>
               <button type="button" onClick={() => handleSortPreset('stock')} disabled={busy || orderedItems.length < 2}>
                 <ArrowDownWideNarrow size={16} />
@@ -589,8 +658,11 @@ function App(): JSX.Element {
                     </div>
                     <div className="compact-numbers">
                       <strong>{item.quantityOnHand}</strong>
-                      <span>{formatUnitPrice(item)}</span>
-                      <span>{formatStockValue(item)}</span>
+                      <span>{hidePurchasePrice ? '进价 已隐藏' : `进价 ${formatPurchasePrice(item)}`}</span>
+                      <span>{`售价 ${formatSalePrice(item)}`}</span>
+                      <span>
+                        {hidePurchasePrice ? `售价库存 ${formatSaleStockValue(item)}` : `毛利 ${formatGrossProfitValue(item)}`}
+                      </span>
                       <button
                         type="button"
                         className="compact-delete"
@@ -646,21 +718,35 @@ function App(): JSX.Element {
                   </label>
 
                   <div className="price-row">
+                    {hidePurchasePrice ? (
+                      <div className="value-field hidden-price">
+                        <span>进价</span>
+                        <strong>已隐藏</strong>
+                      </div>
+                    ) : (
+                      <label className="price-field">
+                        <span>进价</span>
+                        <input
+                          value={priceDrafts[item.barcode]?.purchaseAmount ?? ''}
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          onChange={(event) => updatePriceDraft(item, { purchaseAmount: event.target.value })}
+                          onBlur={() => handlePriceBlur(item)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.currentTarget.blur();
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
                     <label className="price-field">
-                      <span>单价</span>
+                      <span>售价</span>
                       <input
-                        value={priceDrafts[item.barcode]?.amount ?? ''}
+                        value={priceDrafts[item.barcode]?.saleAmount ?? ''}
                         inputMode="decimal"
                         placeholder="0.00"
-                        onChange={(event) =>
-                          setPriceDrafts((drafts) => ({
-                            ...drafts,
-                            [item.barcode]: {
-                              amount: event.target.value,
-                              currency: drafts[item.barcode]?.currency ?? item.priceCurrency
-                            }
-                          }))
-                        }
+                        onChange={(event) => updatePriceDraft(item, { saleAmount: event.target.value })}
                         onBlur={() => handlePriceBlur(item)}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter') {
@@ -683,8 +769,16 @@ function App(): JSX.Element {
                       </select>
                     </label>
                     <div className="value-field">
-                      <span>库存价值</span>
-                      <strong>{formatStockValue(item)}</strong>
+                      <span>库存成本</span>
+                      <strong>{hidePurchasePrice ? '已隐藏' : formatPurchaseStockValue(item)}</strong>
+                    </div>
+                    <div className="value-field">
+                      <span>售价估值</span>
+                      <strong>{formatSaleStockValue(item)}</strong>
+                    </div>
+                    <div className="value-field">
+                      <span>毛利估算</span>
+                      <strong>{hidePurchasePrice ? '已隐藏' : formatGrossProfitValue(item)}</strong>
                     </div>
                   </div>
 
@@ -862,7 +956,8 @@ function filterItems(items: InventoryItem[], query: string): InventoryItem[] {
       item.brand,
       item.category,
       item.priceCurrency,
-      item.priceAmount === null ? '' : String(item.priceAmount)
+      item.priceAmount === null ? '' : String(item.priceAmount),
+      item.salePriceAmount === null ? '' : String(item.salePriceAmount)
     ]
       .join(' ')
       .toLowerCase();
@@ -874,8 +969,11 @@ function compareByPreset(a: InventoryItem, b: InventoryItem, preset: SortPreset)
   if (preset === 'name') {
     return nameCollator.compare(displayName(a), displayName(b)) || compareManualOrder(a, b);
   }
-  if (preset === 'price') {
-    return comparePriceDescending(a, b) || compareManualOrder(a, b);
+  if (preset === 'purchasePrice') {
+    return comparePriceDescending(a, b, 'purchase') || compareManualOrder(a, b);
+  }
+  if (preset === 'salePrice') {
+    return comparePriceDescending(a, b, 'sale') || compareManualOrder(a, b);
   }
   if (preset === 'stock') {
     return b.quantityOnHand - a.quantityOnHand || compareManualOrder(a, b);
@@ -893,17 +991,19 @@ function displayName(item: InventoryItem): string {
   return item.nickname || item.lookupName || item.barcode;
 }
 
-function comparePriceDescending(a: InventoryItem, b: InventoryItem): number {
-  if (a.priceAmount === null && b.priceAmount === null) {
+function comparePriceDescending(a: InventoryItem, b: InventoryItem, priceType: 'purchase' | 'sale'): number {
+  const aPrice = priceType === 'purchase' ? a.priceAmount : a.salePriceAmount;
+  const bPrice = priceType === 'purchase' ? b.priceAmount : b.salePriceAmount;
+  if (aPrice === null && bPrice === null) {
     return 0;
   }
-  if (a.priceAmount === null) {
+  if (aPrice === null) {
     return 1;
   }
-  if (b.priceAmount === null) {
+  if (bPrice === null) {
     return -1;
   }
-  return b.priceAmount - a.priceAmount;
+  return bPrice - aPrice;
 }
 
 function compareManualOrder(a: InventoryItem, b: InventoryItem): number {
@@ -956,22 +1056,53 @@ function parsePrice(value: string): number | null {
   return Math.round(parsed * 100) / 100;
 }
 
-function formatUnitPrice(item: InventoryItem): string {
+function priceDraftFromItem(item: InventoryItem): PriceDraft {
+  return {
+    purchaseAmount: item.priceAmount === null ? '' : String(item.priceAmount),
+    saleAmount: item.salePriceAmount === null ? '' : String(item.salePriceAmount),
+    currency: item.priceCurrency
+  };
+}
+
+function formatPurchasePrice(item: InventoryItem): string {
   if (item.priceAmount === null) {
     return '未定价';
   }
   return `${item.priceCurrency} ${formatNumber(item.priceAmount)}`;
 }
 
-function formatStockValue(item: InventoryItem): string {
+function formatSalePrice(item: InventoryItem): string {
+  if (item.salePriceAmount === null) {
+    return '未定价';
+  }
+  return `${item.priceCurrency} ${formatNumber(item.salePriceAmount)}`;
+}
+
+function formatPurchaseStockValue(item: InventoryItem): string {
   if (item.priceAmount === null) {
     return '-';
   }
   return `${item.priceCurrency} ${formatNumber(item.priceAmount * item.quantityOnHand)}`;
 }
 
-function formatValueSummary(values: Partial<Record<CurrencyCode, number>>): string {
-  const entries = Object.entries(values).filter(([, value]) => typeof value === 'number' && value > 0);
+function formatSaleStockValue(item: InventoryItem): string {
+  if (item.salePriceAmount === null) {
+    return '-';
+  }
+  return `${item.priceCurrency} ${formatNumber(item.salePriceAmount * item.quantityOnHand)}`;
+}
+
+function formatGrossProfitValue(item: InventoryItem): string {
+  if (item.priceAmount === null || item.salePriceAmount === null) {
+    return '-';
+  }
+  return `${item.priceCurrency} ${formatNumber((item.salePriceAmount - item.priceAmount) * item.quantityOnHand)}`;
+}
+
+function formatValueSummary(values: ValueByCurrency, positiveOnly = true): string {
+  const entries = Object.entries(values).filter(([, value]) =>
+    typeof value === 'number' && (positiveOnly ? value > 0 : value !== 0)
+  );
   if (entries.length === 0) {
     return '-';
   }

@@ -36,6 +36,7 @@ export function createInventoryItem(barcode: string, timestamp = nowIso()): Inve
     category: '',
     imageUrl: '',
     priceAmount: null,
+    salePriceAmount: null,
     priceCurrency: 'CAD',
     lookupSource: 'none',
     lookupConfidence: 0,
@@ -140,7 +141,8 @@ export function updateNickname(
 export function updatePrice(
   inventory: InventoryFile,
   rawBarcode: string,
-  priceAmount: number | null,
+  purchasePriceAmount: number | null,
+  salePriceAmount: number | null,
   priceCurrency: InventoryItem['priceCurrency'],
   timestamp = nowIso()
 ): InventoryFile {
@@ -150,7 +152,8 @@ export function updatePrice(
   if (!item) {
     return inventory;
   }
-  item.priceAmount = normalizePriceAmount(priceAmount);
+  item.priceAmount = normalizePriceAmount(purchasePriceAmount);
+  item.salePriceAmount = normalizePriceAmount(salePriceAmount);
   item.priceCurrency = priceCurrency;
   item.updatedAt = timestamp;
   next.items[barcode] = item;

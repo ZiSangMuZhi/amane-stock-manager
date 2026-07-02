@@ -35,9 +35,17 @@ describe('inventory logic', () => {
 
   it('stores item prices and currency for value statistics', () => {
     const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
-    const priced = updatePrice(stocked.inventory, '4573102661449', 2480.559, 'CAD', '2026-06-23T12:01:00.000Z');
+    const priced = updatePrice(
+      stocked.inventory,
+      '4573102661449',
+      2480.559,
+      3200,
+      'CAD',
+      '2026-06-23T12:01:00.000Z'
+    );
 
     expect(priced.items['4573102661449']?.priceAmount).toBe(2480.56);
+    expect(priced.items['4573102661449']?.salePriceAmount).toBe(3200);
     expect(priced.items['4573102661449']?.priceCurrency).toBe('CAD');
   });
 
@@ -52,7 +60,7 @@ describe('inventory logic', () => {
   it('does not recreate a deleted item from stale field saves', () => {
     const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
     const removed = deleteInventoryItem(stocked.inventory, '4573102661449', '2026-06-23T12:01:00.000Z');
-    const priced = updatePrice(removed, '4573102661449', 25, 'CAD', '2026-06-23T12:02:00.000Z');
+    const priced = updatePrice(removed, '4573102661449', 25, 30, 'CAD', '2026-06-23T12:02:00.000Z');
     const renamed = updateNickname(priced, '4573102661449', 'stale blur', '2026-06-23T12:03:00.000Z');
 
     expect(renamed.items['4573102661449']).toBeUndefined();

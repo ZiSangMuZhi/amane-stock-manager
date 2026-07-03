@@ -45,6 +45,16 @@ button {
   border: 0;
 }
 
+:root[data-theme="dark"] {
+  color: #e7eaee;
+  background: #111315;
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] body {
+  background: #111315;
+}
+
 .app-shell {
   min-height: 100vh;
   background:
@@ -422,6 +432,11 @@ button:disabled {
 .view-control button.active {
   color: #ffffff;
   background: #2563eb;
+}
+
+.theme-toggle.active {
+  color: #175cd3;
+  background: #eff8ff;
 }
 
 .update-dot {
@@ -998,6 +1013,215 @@ dd {
 
 .modal-actions {
   justify-content: flex-end;
+}
+
+.app-shell[data-theme="dark"] {
+  color: #e7eaee;
+  background:
+    linear-gradient(180deg, rgba(31, 34, 38, 0.96), rgba(17, 19, 21, 0.98)),
+    #111315;
+}
+
+.app-shell[data-theme="dark"] .topbar,
+.app-shell[data-theme="dark"] .popover,
+.app-shell[data-theme="dark"] .mode-control,
+.app-shell[data-theme="dark"] .metric,
+.app-shell[data-theme="dark"] .view-control,
+.app-shell[data-theme="dark"] .search-field,
+.app-shell[data-theme="dark"] .privacy-toggle,
+.app-shell[data-theme="dark"] .item-card,
+.app-shell[data-theme="dark"] .compact-card,
+.app-shell[data-theme="dark"] .empty-grid,
+.app-shell[data-theme="dark"] .modal {
+  border-color: #30363d;
+  background: #1a1d21;
+}
+
+.app-shell[data-theme="dark"] .topbar {
+  background: rgba(26, 29, 33, 0.94);
+}
+
+.app-shell[data-theme="dark"] .control-band {
+  border-bottom-color: #30363d;
+}
+
+.app-shell[data-theme="dark"] .item-card,
+.app-shell[data-theme="dark"] .compact-card {
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.28);
+}
+
+.app-shell[data-theme="dark"] .item-card.empty,
+.app-shell[data-theme="dark"] .compact-card.empty {
+  border-color: #b5473f;
+}
+
+.app-shell[data-theme="dark"] .brand-copy span,
+.app-shell[data-theme="dark"] .file-strip,
+.app-shell[data-theme="dark"] .scan-form label,
+.app-shell[data-theme="dark"] .metric span,
+.app-shell[data-theme="dark"] .update-strip,
+.app-shell[data-theme="dark"] .view-control button,
+.app-shell[data-theme="dark"] .result-count,
+.app-shell[data-theme="dark"] .item-title span,
+.app-shell[data-theme="dark"] .barcode-line,
+.app-shell[data-theme="dark"] .nickname-field,
+.app-shell[data-theme="dark"] .price-field,
+.app-shell[data-theme="dark"] .currency-field,
+.app-shell[data-theme="dark"] .value-field,
+.app-shell[data-theme="dark"] .compact-main span,
+.app-shell[data-theme="dark"] .compact-main code,
+.app-shell[data-theme="dark"] .compact-numbers span,
+.app-shell[data-theme="dark"] dt {
+  color: #aab2bd;
+}
+
+.app-shell[data-theme="dark"] .brand-copy strong,
+.app-shell[data-theme="dark"] .metric strong,
+.app-shell[data-theme="dark"] .item-title h2,
+.app-shell[data-theme="dark"] .quantity,
+.app-shell[data-theme="dark"] .value-field strong,
+.app-shell[data-theme="dark"] .compact-main strong,
+.app-shell[data-theme="dark"] .compact-numbers strong,
+.app-shell[data-theme="dark"] dd,
+.app-shell[data-theme="dark"] .empty-state,
+.app-shell[data-theme="dark"] .modal-head h2 {
+  color: #f2f4f7;
+}
+
+.app-shell[data-theme="dark"] .tool-button,
+.app-shell[data-theme="dark"] .empty-actions button,
+.app-shell[data-theme="dark"] .modal-actions button,
+.app-shell[data-theme="dark"] .update-strip button,
+.app-shell[data-theme="dark"] .popover button,
+.app-shell[data-theme="dark"] .sort-bar button,
+.app-shell[data-theme="dark"] .icon-button,
+.app-shell[data-theme="dark"] .search-field button,
+.app-shell[data-theme="dark"] .drag-handle,
+.app-shell[data-theme="dark"] .quantity,
+.app-shell[data-theme="dark"] .item-stats div,
+.app-shell[data-theme="dark"] .time-list div,
+.app-shell[data-theme="dark"] .value-field,
+.app-shell[data-theme="dark"] .value-field.hidden-price {
+  color: #d7dde5;
+  background: #24282e;
+}
+
+.app-shell[data-theme="dark"] .tool-button:hover,
+.app-shell[data-theme="dark"] .empty-actions button:hover,
+.app-shell[data-theme="dark"] .modal-actions button:hover,
+.app-shell[data-theme="dark"] .update-strip button:hover,
+.app-shell[data-theme="dark"] .popover button:hover,
+.app-shell[data-theme="dark"] .sort-bar button:hover {
+  background: #30363d;
+}
+
+.app-shell[data-theme="dark"] .scan-form input,
+.app-shell[data-theme="dark"] .nickname-field input,
+.app-shell[data-theme="dark"] .price-field input,
+.app-shell[data-theme="dark"] .currency-field select,
+.app-shell[data-theme="dark"] .modal input,
+.app-shell[data-theme="dark"] .search-field input {
+  color: #f2f4f7;
+  border-color: #3a4149;
+  background: #111315;
+}
+
+.app-shell[data-theme="dark"] input::placeholder {
+  color: #7f8996;
+}
+
+.app-shell[data-theme="dark"] .scan-form input:focus,
+.app-shell[data-theme="dark"] .nickname-field input:focus,
+.app-shell[data-theme="dark"] .price-field input:focus,
+.app-shell[data-theme="dark"] .currency-field select:focus,
+.app-shell[data-theme="dark"] .modal input:focus {
+  border-color: #6ea8ff;
+  box-shadow: 0 0 0 3px rgba(110, 168, 255, 0.18);
+}
+
+.app-shell[data-theme="dark"] .mode-control button,
+.app-shell[data-theme="dark"] .privacy-toggle {
+  color: #cbd3dc;
+}
+
+.app-shell[data-theme="dark"] .view-control button.active,
+.app-shell[data-theme="dark"] .theme-toggle.active {
+  color: #ffffff;
+  background: #2f6fd6;
+}
+
+.app-shell[data-theme="dark"] .privacy-toggle.active {
+  color: #9dc3ff;
+  border-color: #326cba;
+  background: #182a40;
+}
+
+.app-shell[data-theme="dark"] .notice.neutral,
+.app-shell[data-theme="dark"] .notice.info {
+  color: #d7dde5;
+  border-color: #30363d;
+  background: #1a1d21;
+}
+
+.app-shell[data-theme="dark"] .notice.success,
+.app-shell[data-theme="dark"] .lookup-pill.found,
+.app-shell[data-theme="dark"] .stock-pill.ok,
+.app-shell[data-theme="dark"] .product-thumb.ok {
+  color: #9ee6bd;
+  border-color: #215b3f;
+  background: #173825;
+}
+
+.app-shell[data-theme="dark"] .notice.warning {
+  color: #ffd68a;
+  border-color: #7a4b16;
+  background: #3c2b17;
+}
+
+.app-shell[data-theme="dark"] .notice.error,
+.app-shell[data-theme="dark"] .lookup-pill.error,
+.app-shell[data-theme="dark"] .stock-pill.zero,
+.app-shell[data-theme="dark"] .product-thumb.zero {
+  color: #ffb4ad;
+  border-color: #7a302b;
+  background: #401f1d;
+}
+
+.app-shell[data-theme="dark"] .lookup-pill.not-found,
+.app-shell[data-theme="dark"] .lookup-pill.idle,
+.app-shell[data-theme="dark"] .source-pill {
+  color: #cbd3dc;
+  background: #24282e;
+}
+
+.app-shell[data-theme="dark"] .lookup-pill.loading {
+  color: #9dc3ff;
+  background: #182a40;
+}
+
+.app-shell[data-theme="dark"] .icon-button.danger,
+.app-shell[data-theme="dark"] .compact-delete {
+  color: #ffb4ad;
+  background: #401f1d;
+}
+
+.app-shell[data-theme="dark"] .icon-button.danger:hover,
+.app-shell[data-theme="dark"] .compact-delete:hover {
+  background: #5a2925;
+}
+
+.app-shell[data-theme="dark"] .empty-actions button:first-child,
+.app-shell[data-theme="dark"] .modal-actions .primary {
+  color: #ffffff;
+  background: #2f6fd6;
+}
+
+.app-shell[data-theme="dark"] .modal-backdrop {
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.app-shell[data-theme="dark"] .empty-grid {
+  border-color: #46505b;
 }
 
 @media (max-width: 1120px) {

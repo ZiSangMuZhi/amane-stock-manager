@@ -21,12 +21,14 @@ import {
   PackagePlus,
   PackageX,
   Pencil,
+  Moon,
   RefreshCw,
   Save,
   ScanBarcode,
   Search,
   SearchX,
   Sheet,
+  Sun,
   Trash2,
   UploadCloud,
   Wifi,
@@ -46,6 +48,7 @@ import {
 
 type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
 type ViewMode = 'standard' | 'compact';
+type ThemeMode = 'light' | 'dark';
 type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: CurrencyCode };
 type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
 type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
@@ -69,6 +72,9 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
+    localStorage.getItem('amane-theme-mode') === 'dark' ? 'dark' : 'light'
+  );
   const [hidePurchasePrice, setHidePurchasePrice] = useState(() => localStorage.getItem('amane-hide-purchase-price') === '1');
   const [searchQuery, setSearchQuery] = useState('');
   const [draggingBarcode, setDraggingBarcode] = useState<string | null>(null);
@@ -113,7 +119,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.11'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.12'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -122,6 +128,11 @@ function App(): JSX.Element {
   useEffect(() => {
     localStorage.setItem('amane-hide-purchase-price', hidePurchasePrice ? '1' : '0');
   }, [hidePurchasePrice]);
+
+  useEffect(() => {
+    localStorage.setItem('amane-theme-mode', themeMode);
+    globalThis.document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(orderedItems.map((item) => [item.barcode, item.nickname]));
@@ -369,7 +380,7 @@ function App(): JSX.Element {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={themeMode}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
@@ -377,7 +388,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.11'}</span>
+            <span>{version ? `v${version}` : 'v0.1.12'}</span>
           </div>
         </div>
 
@@ -517,6 +528,16 @@ function App(): JSX.Element {
                 缩略
               </button>
             </div>
+            <button
+              type="button"
+              className={`theme-toggle ${themeMode === 'dark' ? 'active' : ''}`}
+              onClick={() => setThemeMode((current) => (current === 'dark' ? 'light' : 'dark'))}
+              aria-pressed={themeMode === 'dark'}
+              title={themeMode === 'dark' ? '切换浅色模式' : '切换深色模式'}
+            >
+              {themeMode === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+              <span>{themeMode === 'dark' ? '浅色' : '深色'}</span>
+            </button>
             <span className={`update-dot ${updateStatus?.state ?? 'idle'}`} />
             <span>{updateStatus?.message ?? '更新状态未检查'}</span>
             <button type="button" onClick={handleCheckUpdates} disabled={busy}>

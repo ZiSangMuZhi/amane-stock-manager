@@ -53,12 +53,16 @@ type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: Curren
 type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
 type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
 
+const themeStorageKey = 'amane-theme-mode';
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
 const currencyOptions: CurrencyCode[] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
 const nameCollator = new Intl.Collator(['zh-Hans-CN', 'zh-CN', 'ja-JP', 'en-US'], {
   numeric: true,
   sensitivity: 'base'
 });
+const initialThemeMode = readStoredThemeMode();
+
+applyThemeMode(initialThemeMode);
 
 function App(): JSX.Element {
   const [document, setDocument] = useState<InventoryDocument>(emptyDocument);
@@ -72,9 +76,7 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
-    localStorage.getItem('amane-theme-mode') === 'dark' ? 'dark' : 'light'
-  );
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
   const [hidePurchasePrice, setHidePurchasePrice] = useState(() => localStorage.getItem('amane-hide-purchase-price') === '1');
   const [searchQuery, setSearchQuery] = useState('');
   const [draggingBarcode, setDraggingBarcode] = useState<string | null>(null);
@@ -138,7 +140,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.13'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.14'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -149,8 +151,8 @@ function App(): JSX.Element {
   }, [hidePurchasePrice]);
 
   useEffect(() => {
-    localStorage.setItem('amane-theme-mode', themeMode);
-    globalThis.document.documentElement.dataset.theme = themeMode;
+    storeThemeMode(themeMode);
+    applyThemeMode(themeMode);
   }, [themeMode]);
 
   useEffect(() => {
@@ -407,7 +409,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.13'}</span>
+            <span>{version ? `v${version}` : 'v0.1.14'}</span>
           </div>
         </div>
 
@@ -991,6 +993,26 @@ function noticeIcon(type: Notice['type']): JSX.Element {
     return <CircleAlert size={17} />;
   }
   return <Barcode size={17} />;
+}
+
+function readStoredThemeMode(): ThemeMode {
+  try {
+    return localStorage.getItem(themeStorageKey) === 'dark' ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
+}
+
+function storeThemeMode(themeMode: ThemeMode): void {
+  try {
+    localStorage.setItem(themeStorageKey, themeMode);
+  } catch {
+    // Theme persistence is best-effort; rendering should continue if storage is unavailable.
+  }
+}
+
+function applyThemeMode(themeMode: ThemeMode): void {
+  globalThis.document.documentElement.dataset.theme = themeMode;
 }
 
 function sortItems(items: InventoryItem[]): InventoryItem[] {

@@ -672,7 +672,7 @@ async function downloadUpdateAsset(
   const assetUrl = new URL(safeFileName, updateUrl).toString();
   const response = await fetch(assetUrl, {
     headers: {
-      'User-Agent': 'AmaneStockManager/0.1.12'
+      'User-Agent': 'AmaneStockManager/0.1.13'
     }
   });
   if (!response.ok) {

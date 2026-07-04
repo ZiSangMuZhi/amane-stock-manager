@@ -104,6 +104,21 @@ function App(): JSX.Element {
             (acc.grossProfitByCurrency[item.priceCurrency] ?? 0) +
             (item.salePriceAmount - item.priceAmount) * item.quantityOnHand;
         }
+        if (item.salePriceAmount !== null && item.totalOut > 0) {
+          acc.outSaleValueByCurrency[item.priceCurrency] =
+            (acc.outSaleValueByCurrency[item.priceCurrency] ?? 0) + item.salePriceAmount * item.totalOut;
+        }
+        if (item.priceAmount !== null && item.totalOut > 0) {
+          acc.outCostValueByCurrency[item.priceCurrency] =
+            (acc.outCostValueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * item.totalOut;
+        }
+        if (item.priceAmount !== null && item.salePriceAmount !== null && item.totalOut > 0) {
+          acc.outGrossProfitByCurrency[item.priceCurrency] =
+            (acc.outGrossProfitByCurrency[item.priceCurrency] ?? 0) +
+            (item.salePriceAmount - item.priceAmount) * item.totalOut;
+          acc.outMarginSaleValueByCurrency[item.priceCurrency] =
+            (acc.outMarginSaleValueByCurrency[item.priceCurrency] ?? 0) + item.salePriceAmount * item.totalOut;
+        }
         return acc;
       },
       {
@@ -112,14 +127,18 @@ function App(): JSX.Element {
         out: 0,
         purchaseValueByCurrency: {} as ValueByCurrency,
         saleValueByCurrency: {} as ValueByCurrency,
-        grossProfitByCurrency: {} as ValueByCurrency
+        grossProfitByCurrency: {} as ValueByCurrency,
+        outSaleValueByCurrency: {} as ValueByCurrency,
+        outCostValueByCurrency: {} as ValueByCurrency,
+        outGrossProfitByCurrency: {} as ValueByCurrency,
+        outMarginSaleValueByCurrency: {} as ValueByCurrency
       }
     );
   }, [orderedItems]);
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.12'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.13'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -388,7 +407,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.12'}</span>
+            <span>{version ? `v${version}` : 'v0.1.13'}</span>
           </div>
         </div>
 
@@ -485,21 +504,40 @@ function App(): JSX.Element {
             </button>
           </form>
 
-          <div className="summary-row">
-            <Metric label="当前库存" value={totals.quantity} icon={<PackageCheck size={18} />} />
-            <Metric label="累计录入" value={totals.in} icon={<PackagePlus size={18} />} />
-            <Metric label="累计出库" value={totals.out} icon={<PackageMinus size={18} />} />
-            <Metric
-              label="库存成本"
-              value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.purchaseValueByCurrency)}
-              icon={hidePurchasePrice ? <EyeOff size={18} /> : <Download size={18} />}
-            />
-            <Metric label="售价估值" value={formatValueSummary(totals.saleValueByCurrency)} icon={<BadgeCheck size={18} />} />
-            <Metric
-              label="毛利估算"
-              value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.grossProfitByCurrency, false)}
-              icon={<ArrowDownWideNarrow size={18} />}
-            />
+          <div className="summary-stack">
+            <div className="summary-row">
+              <Metric label="当前库存" value={totals.quantity} icon={<PackageCheck size={18} />} />
+              <Metric label="累计录入" value={totals.in} icon={<PackagePlus size={18} />} />
+              <Metric label="累计出库" value={totals.out} icon={<PackageMinus size={18} />} />
+              <Metric
+                label="库存成本"
+                value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.purchaseValueByCurrency)}
+                icon={hidePurchasePrice ? <EyeOff size={18} /> : <Download size={18} />}
+              />
+              <Metric label="售价估值" value={formatValueSummary(totals.saleValueByCurrency)} icon={<BadgeCheck size={18} />} />
+              <Metric
+                label="毛利估算"
+                value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.grossProfitByCurrency, false)}
+                icon={<ArrowDownWideNarrow size={18} />}
+              />
+            </div>
+            <div className="summary-row sales-summary-row">
+              <Metric label="出库销售额" value={formatValueSummary(totals.outSaleValueByCurrency)} icon={<BadgeCheck size={18} />} />
+              <Metric
+                label="出库成本"
+                value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.outCostValueByCurrency)}
+                icon={hidePurchasePrice ? <EyeOff size={18} /> : <Download size={18} />}
+              />
+              <Metric
+                label="出库毛利率"
+                value={
+                  hidePurchasePrice
+                    ? '已隐藏'
+                    : formatMarginSummary(totals.outGrossProfitByCurrency, totals.outMarginSaleValueByCurrency)
+                }
+                icon={<ArrowDownWideNarrow size={18} />}
+              />
+            </div>
           </div>
         </section>
 
@@ -1130,10 +1168,33 @@ function formatValueSummary(values: ValueByCurrency, positiveOnly = true): strin
   return entries.map(([currency, value]) => `${currency} ${formatNumber(value ?? 0)}`).join(' / ');
 }
 
+function formatMarginSummary(profitValues: ValueByCurrency, saleValues: ValueByCurrency): string {
+  const entries = Object.entries(saleValues).filter(
+    ([, saleValue]) => typeof saleValue === 'number' && saleValue > 0
+  );
+  if (entries.length === 0) {
+    return '-';
+  }
+  return entries
+    .map(([currency, saleValue]) => {
+      const profitValue = profitValues[currency as CurrencyCode] ?? 0;
+      return `${currency} ${formatPercent(profitValue / (saleValue ?? 1))}`;
+    })
+    .join(' / ');
+}
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
     maximumFractionDigits: 2
+  }).format(value);
+}
+
+function formatPercent(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    style: 'percent'
   }).format(value);
 }
 

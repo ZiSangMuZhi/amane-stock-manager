@@ -295,11 +295,21 @@ button:disabled {
   background: #b42318;
 }
 
+.summary-stack {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
 .summary-row {
   display: grid;
   grid-template-columns: repeat(6, minmax(88px, 1fr));
   gap: 8px;
   min-width: 0;
+}
+
+.sales-summary-row {
+  grid-template-columns: repeat(3, minmax(124px, 1fr));
 }
 
 .metric {

@@ -484,7 +484,7 @@ button:disabled {
 
 .inventory-tools {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto auto;
   gap: 10px;
   align-items: center;
   min-width: 0;
@@ -524,6 +524,32 @@ button:disabled {
   color: #667085;
   background: #f2f4f7;
   cursor: pointer;
+}
+
+.scope-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(58px, 1fr));
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid #cdd5df;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.scope-control button {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 6px;
+  color: #667085;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.scope-control button.active {
+  color: #ffffff;
+  background: #0f766e;
 }
 
 .privacy-toggle {
@@ -834,6 +860,11 @@ button:disabled {
   background: #ecfdf3;
 }
 
+.stock-pill.out {
+  color: #175cd3;
+  background: #eff8ff;
+}
+
 .lookup-pill.not-found,
 .lookup-pill.idle,
 .source-pill {
@@ -1051,6 +1082,7 @@ dd {
 .app-shell[data-theme="dark"] .mode-control,
 .app-shell[data-theme="dark"] .metric,
 .app-shell[data-theme="dark"] .view-control,
+.app-shell[data-theme="dark"] .scope-control,
 .app-shell[data-theme="dark"] .search-field,
 .app-shell[data-theme="dark"] .privacy-toggle,
 .app-shell[data-theme="dark"] .item-card,
@@ -1085,6 +1117,7 @@ dd {
 .app-shell[data-theme="dark"] .metric span,
 .app-shell[data-theme="dark"] .update-strip,
 .app-shell[data-theme="dark"] .view-control button,
+.app-shell[data-theme="dark"] .scope-control button,
 .app-shell[data-theme="dark"] .result-count,
 .app-shell[data-theme="dark"] .item-title span,
 .app-shell[data-theme="dark"] .barcode-line,
@@ -1169,6 +1202,7 @@ dd {
 }
 
 .app-shell[data-theme="dark"] .view-control button.active,
+.app-shell[data-theme="dark"] .scope-control button.active,
 .app-shell[data-theme="dark"] .theme-toggle.active {
   color: #ffffff;
   background: #2f6fd6;
@@ -1218,7 +1252,8 @@ dd {
   background: #24282e;
 }
 
-.app-shell[data-theme="dark"] .lookup-pill.loading {
+.app-shell[data-theme="dark"] .lookup-pill.loading,
+.app-shell[data-theme="dark"] .stock-pill.out {
   color: #9dc3ff;
   background: #182a40;
 }

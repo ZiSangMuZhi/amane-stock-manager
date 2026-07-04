@@ -48,6 +48,7 @@ import {
 
 type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
 type ViewMode = 'standard' | 'compact';
+type InventoryScope = 'all' | 'outbound' | 'notOutbound';
 type ThemeMode = 'light' | 'dark';
 type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: CurrencyCode };
 type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
@@ -76,6 +77,7 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
+  const [inventoryScope, setInventoryScope] = useState<InventoryScope>('all');
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
   const [hidePurchasePrice, setHidePurchasePrice] = useState(() => localStorage.getItem('amane-hide-purchase-price') === '1');
   const [searchQuery, setSearchQuery] = useState('');
@@ -86,25 +88,27 @@ function App(): JSX.Element {
 
   const inventory = document.inventory;
   const orderedItems = useMemo(() => sortItems(Object.values(inventory?.items ?? {})), [inventory]);
-  const visibleItems = useMemo(() => filterItems(orderedItems, searchQuery), [orderedItems, searchQuery]);
+  const scopedItems = useMemo(() => filterByInventoryScope(orderedItems, inventoryScope), [orderedItems, inventoryScope]);
+  const visibleItems = useMemo(() => filterItems(scopedItems, searchQuery), [scopedItems, searchQuery]);
   const totals = useMemo(() => {
-    return orderedItems.reduce(
+    return scopedItems.reduce(
       (acc, item) => {
-        acc.quantity += item.quantityOnHand;
+        const scopedQuantity = inventoryScope === 'outbound' ? item.totalOut : item.quantityOnHand;
+        acc.quantity += scopedQuantity;
         acc.in += item.totalIn;
         acc.out += item.totalOut;
-        if (item.priceAmount !== null && item.quantityOnHand > 0) {
+        if (item.priceAmount !== null && scopedQuantity > 0) {
           acc.purchaseValueByCurrency[item.priceCurrency] =
-            (acc.purchaseValueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * item.quantityOnHand;
+            (acc.purchaseValueByCurrency[item.priceCurrency] ?? 0) + item.priceAmount * scopedQuantity;
         }
-        if (item.salePriceAmount !== null && item.quantityOnHand > 0) {
+        if (item.salePriceAmount !== null && scopedQuantity > 0) {
           acc.saleValueByCurrency[item.priceCurrency] =
-            (acc.saleValueByCurrency[item.priceCurrency] ?? 0) + item.salePriceAmount * item.quantityOnHand;
+            (acc.saleValueByCurrency[item.priceCurrency] ?? 0) + item.salePriceAmount * scopedQuantity;
         }
-        if (item.priceAmount !== null && item.salePriceAmount !== null && item.quantityOnHand > 0) {
+        if (item.priceAmount !== null && item.salePriceAmount !== null && scopedQuantity > 0) {
           acc.grossProfitByCurrency[item.priceCurrency] =
             (acc.grossProfitByCurrency[item.priceCurrency] ?? 0) +
-            (item.salePriceAmount - item.priceAmount) * item.quantityOnHand;
+            (item.salePriceAmount - item.priceAmount) * scopedQuantity;
         }
         if (item.salePriceAmount !== null && item.totalOut > 0) {
           acc.outSaleValueByCurrency[item.priceCurrency] =
@@ -136,11 +140,11 @@ function App(): JSX.Element {
         outMarginSaleValueByCurrency: {} as ValueByCurrency
       }
     );
-  }, [orderedItems]);
+  }, [inventoryScope, scopedItems]);
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.14'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.15'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -409,7 +413,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.14'}</span>
+            <span>{version ? `v${version}` : 'v0.1.15'}</span>
           </div>
         </div>
 
@@ -508,17 +512,25 @@ function App(): JSX.Element {
 
           <div className="summary-stack">
             <div className="summary-row">
-              <Metric label="当前库存" value={totals.quantity} icon={<PackageCheck size={18} />} />
+              <Metric
+                label={inventoryScope === 'outbound' ? '出库数量' : '当前库存'}
+                value={totals.quantity}
+                icon={inventoryScope === 'outbound' ? <PackageMinus size={18} /> : <PackageCheck size={18} />}
+              />
               <Metric label="累计录入" value={totals.in} icon={<PackagePlus size={18} />} />
               <Metric label="累计出库" value={totals.out} icon={<PackageMinus size={18} />} />
               <Metric
-                label="库存成本"
+                label={inventoryScope === 'outbound' ? '出库成本' : '库存成本'}
                 value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.purchaseValueByCurrency)}
                 icon={hidePurchasePrice ? <EyeOff size={18} /> : <Download size={18} />}
               />
-              <Metric label="售价估值" value={formatValueSummary(totals.saleValueByCurrency)} icon={<BadgeCheck size={18} />} />
               <Metric
-                label="毛利估算"
+                label={inventoryScope === 'outbound' ? '出库销售额' : '售价估值'}
+                value={formatValueSummary(totals.saleValueByCurrency)}
+                icon={<BadgeCheck size={18} />}
+              />
+              <Metric
+                label={inventoryScope === 'outbound' ? '出库毛利' : '毛利估算'}
                 value={hidePurchasePrice ? '已隐藏' : formatValueSummary(totals.grossProfitByCurrency, false)}
                 icon={<ArrowDownWideNarrow size={18} />}
               />
@@ -635,6 +647,32 @@ function App(): JSX.Element {
                 </button>
               )}
             </label>
+            <div className="scope-control" aria-label="库存分类视图">
+              <button
+                type="button"
+                className={inventoryScope === 'all' ? 'active' : ''}
+                onClick={() => setInventoryScope('all')}
+                aria-pressed={inventoryScope === 'all'}
+              >
+                全部
+              </button>
+              <button
+                type="button"
+                className={inventoryScope === 'outbound' ? 'active' : ''}
+                onClick={() => setInventoryScope('outbound')}
+                aria-pressed={inventoryScope === 'outbound'}
+              >
+                已出库
+              </button>
+              <button
+                type="button"
+                className={inventoryScope === 'notOutbound' ? 'active' : ''}
+                onClick={() => setInventoryScope('notOutbound')}
+                aria-pressed={inventoryScope === 'notOutbound'}
+              >
+                未出库
+              </button>
+            </div>
             <label className={`privacy-toggle ${hidePurchasePrice ? 'active' : ''}`}>
               <input
                 type="checkbox"
@@ -678,8 +716,8 @@ function App(): JSX.Element {
                 <span>最近</span>
               </button>
             </div>
-            <span className="result-count">
-              {visibleItems.length}/{orderedItems.length}
+            <span className="result-count" title={`全部品类 ${orderedItems.length}`}>
+              {visibleItems.length}/{scopedItems.length}
             </span>
           </section>
         )}
@@ -694,13 +732,13 @@ function App(): JSX.Element {
             ) : visibleItems.length === 0 ? (
               <div className="empty-grid">
                 <SearchX size={36} />
-                <span>没有匹配商品</span>
+                <span>{searchQuery.trim() ? '没有匹配商品' : emptyScopeMessage(inventoryScope)}</span>
               </div>
             ) : (
               visibleItems.map((item) =>
                 viewMode === 'compact' ? (
                   <article
-                    className={`compact-card ${item.quantityOnHand === 0 ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                    className={`compact-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
                     key={item.barcode}
                     draggable={!busy}
                     onDragStart={(event) => handleDragStart(event, item)}
@@ -718,11 +756,13 @@ function App(): JSX.Element {
                       <span>{item.lookupName || '未识别商品'}</span>
                     </div>
                     <div className="compact-numbers">
-                      <strong>{item.quantityOnHand}</strong>
+                      <strong title={primaryQuantityTitle(inventoryScope)}>{primaryQuantity(item, inventoryScope)}</strong>
                       <span>{hidePurchasePrice ? '进价 已隐藏' : `进价 ${formatPurchasePrice(item)}`}</span>
                       <span>{`售价 ${formatSalePrice(item)}`}</span>
                       <span>
-                        {hidePurchasePrice ? `售价库存 ${formatSaleStockValue(item)}` : `毛利 ${formatGrossProfitValue(item)}`}
+                        {hidePurchasePrice
+                          ? `${inventoryScope === 'outbound' ? '出库销售' : '售价库存'} ${formatSaleScopeValue(item, inventoryScope)}`
+                          : `毛利 ${formatGrossProfitScopeValue(item, inventoryScope)}`}
                       </span>
                       <button
                         type="button"
@@ -737,7 +777,7 @@ function App(): JSX.Element {
                   </article>
                 ) : (
                 <article
-                  className={`item-card ${item.quantityOnHand === 0 ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                  className={`item-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
                   key={item.barcode}
                   draggable={!busy}
                   onDragStart={(event) => handleDragStart(event, item)}
@@ -754,7 +794,9 @@ function App(): JSX.Element {
                       <h2>{item.nickname || item.lookupName || item.barcode}</h2>
                       <span>{item.lookupName || '未识别商品'}</span>
                     </div>
-                    <strong className="quantity">{item.quantityOnHand}</strong>
+                    <strong className="quantity" title={primaryQuantityTitle(inventoryScope)}>
+                      {primaryQuantity(item, inventoryScope)}
+                    </strong>
                   </div>
 
                   <div className="barcode-line">
@@ -830,16 +872,16 @@ function App(): JSX.Element {
                       </select>
                     </label>
                     <div className="value-field">
-                      <span>库存成本</span>
-                      <strong>{hidePurchasePrice ? '已隐藏' : formatPurchaseStockValue(item)}</strong>
+                      <span>{inventoryScope === 'outbound' ? '出库成本' : '库存成本'}</span>
+                      <strong>{hidePurchasePrice ? '已隐藏' : formatPurchaseScopeValue(item, inventoryScope)}</strong>
                     </div>
                     <div className="value-field">
-                      <span>售价估值</span>
-                      <strong>{formatSaleStockValue(item)}</strong>
+                      <span>{inventoryScope === 'outbound' ? '出库销售额' : '售价估值'}</span>
+                      <strong>{formatSaleScopeValue(item, inventoryScope)}</strong>
                     </div>
                     <div className="value-field">
-                      <span>毛利估算</span>
-                      <strong>{hidePurchasePrice ? '已隐藏' : formatGrossProfitValue(item)}</strong>
+                      <span>{inventoryScope === 'outbound' ? '出库毛利' : '毛利估算'}</span>
+                      <strong>{hidePurchasePrice ? '已隐藏' : formatGrossProfitScopeValue(item, inventoryScope)}</strong>
                     </div>
                   </div>
 
@@ -853,6 +895,12 @@ function App(): JSX.Element {
                       {item.quantityOnHand === 0 ? <PackageX size={15} /> : <BadgeCheck size={15} />}
                       {item.quantityOnHand === 0 ? '库存为 0' : '库存正常'}
                     </span>
+                    {inventoryScope === 'outbound' && (
+                      <span className="stock-pill out">
+                        <PackageMinus size={15} />
+                        出库 {item.totalOut}
+                      </span>
+                    )}
                     <button type="button" className="icon-button" onClick={() => handleRefreshLookup(item)} disabled={busy}>
                       <RefreshCw size={15} />
                     </button>
@@ -1046,6 +1094,38 @@ function filterItems(items: InventoryItem[], query: string): InventoryItem[] {
   });
 }
 
+function filterByInventoryScope(items: InventoryItem[], scope: InventoryScope): InventoryItem[] {
+  if (scope === 'outbound') {
+    return items.filter((item) => item.totalOut > 0);
+  }
+  if (scope === 'notOutbound') {
+    return items.filter((item) => item.totalOut === 0);
+  }
+  return items;
+}
+
+function primaryQuantity(item: InventoryItem, scope: InventoryScope): number {
+  return scope === 'outbound' ? item.totalOut : item.quantityOnHand;
+}
+
+function isPrimaryQuantityEmpty(item: InventoryItem, scope: InventoryScope): boolean {
+  return primaryQuantity(item, scope) === 0;
+}
+
+function primaryQuantityTitle(scope: InventoryScope): string {
+  return scope === 'outbound' ? '累计出库数量' : '当前库存数量';
+}
+
+function emptyScopeMessage(scope: InventoryScope): string {
+  if (scope === 'outbound') {
+    return '暂无已出库商品';
+  }
+  if (scope === 'notOutbound') {
+    return '暂无未出库商品';
+  }
+  return '暂无商品';
+}
+
 function compareByPreset(a: InventoryItem, b: InventoryItem, preset: SortPreset): number {
   if (preset === 'name') {
     return nameCollator.compare(displayName(a), displayName(b)) || compareManualOrder(a, b);
@@ -1159,25 +1239,25 @@ function formatSalePrice(item: InventoryItem): string {
   return `${item.priceCurrency} ${formatNumber(item.salePriceAmount)}`;
 }
 
-function formatPurchaseStockValue(item: InventoryItem): string {
+function formatPurchaseScopeValue(item: InventoryItem, scope: InventoryScope): string {
   if (item.priceAmount === null) {
     return '-';
   }
-  return `${item.priceCurrency} ${formatNumber(item.priceAmount * item.quantityOnHand)}`;
+  return `${item.priceCurrency} ${formatNumber(item.priceAmount * primaryQuantity(item, scope))}`;
 }
 
-function formatSaleStockValue(item: InventoryItem): string {
+function formatSaleScopeValue(item: InventoryItem, scope: InventoryScope): string {
   if (item.salePriceAmount === null) {
     return '-';
   }
-  return `${item.priceCurrency} ${formatNumber(item.salePriceAmount * item.quantityOnHand)}`;
+  return `${item.priceCurrency} ${formatNumber(item.salePriceAmount * primaryQuantity(item, scope))}`;
 }
 
-function formatGrossProfitValue(item: InventoryItem): string {
+function formatGrossProfitScopeValue(item: InventoryItem, scope: InventoryScope): string {
   if (item.priceAmount === null || item.salePriceAmount === null) {
     return '-';
   }
-  return `${item.priceCurrency} ${formatNumber((item.salePriceAmount - item.priceAmount) * item.quantityOnHand)}`;
+  return `${item.priceCurrency} ${formatNumber((item.salePriceAmount - item.priceAmount) * primaryQuantity(item, scope))}`;
 }
 
 function formatValueSummary(values: ValueByCurrency, positiveOnly = true): string {

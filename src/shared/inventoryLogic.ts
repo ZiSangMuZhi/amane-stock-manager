@@ -161,6 +161,30 @@ export function updatePrice(
   return next;
 }
 
+export function updateQuantityOnHand(
+  inventory: InventoryFile,
+  rawBarcode: string,
+  quantityOnHand: number,
+  timestamp = nowIso()
+): InventoryFile {
+  if (!Number.isSafeInteger(quantityOnHand) || quantityOnHand < 0) {
+    throw new Error('库存数量必须是大于或等于 0 的整数。');
+  }
+
+  const barcode = normalizeBarcode(rawBarcode);
+  const next = cloneInventory(inventory);
+  const item = next.items[barcode];
+  if (!item) {
+    return inventory;
+  }
+
+  item.quantityOnHand = quantityOnHand;
+  item.updatedAt = timestamp;
+  next.items[barcode] = item;
+  next.updatedAt = timestamp;
+  return next;
+}
+
 export function deleteInventoryItem(
   inventory: InventoryFile,
   rawBarcode: string,

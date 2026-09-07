@@ -53,6 +53,8 @@ type ThemeMode = 'light' | 'dark';
 type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: CurrencyCode };
 type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
 type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
+type ActionOptions = { focusBarcode?: boolean; preserveScroll?: boolean; anchorBarcode?: string };
+type ScrollSnapshot = { scrollY: number; anchorBarcode?: string; anchorTop?: number };
 
 const themeStorageKey = 'amane-theme-mode';
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
@@ -76,6 +78,7 @@ function App(): JSX.Element {
   const [draftName, setDraftName] = useState('');
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
   const [inventoryScope, setInventoryScope] = useState<InventoryScope>('all');
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
@@ -144,7 +147,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
-    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.15'));
+    window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.16'));
     return window.amaneStock.onInventoryChanged((next) => {
       setDocument(next);
     });
@@ -174,13 +177,19 @@ function App(): JSX.Element {
         ])
       )
     );
+    setQuantityDrafts(Object.fromEntries(orderedItems.map((item) => [item.barcode, String(item.quantityOnHand)])));
   }, [orderedItems]);
 
   useEffect(() => {
     barcodeInputRef.current?.focus();
-  }, [document.filePath, mode, busy]);
+  }, [document.filePath, mode]);
 
-  async function runAction<T>(action: () => Promise<T>, onSuccess?: (result: T) => void): Promise<void> {
+  async function runAction<T>(
+    action: () => Promise<T>,
+    onSuccess?: (result: T) => void,
+    options: ActionOptions = {}
+  ): Promise<void> {
+    const scrollSnapshot = options.preserveScroll ? captureScrollSnapshot(options.anchorBarcode) : null;
     setBusy(true);
     try {
       const result = await action();
@@ -189,8 +198,25 @@ function App(): JSX.Element {
       showError(error);
     } finally {
       setBusy(false);
-      barcodeInputRef.current?.focus();
+      if (scrollSnapshot) {
+        restoreScrollSnapshotAfterRender(scrollSnapshot);
+      }
+      if (options.focusBarcode !== false) {
+        window.requestAnimationFrame(() => barcodeInputRef.current?.focus());
+      }
     }
+  }
+
+  async function runCardAction<T>(
+    itemBarcode: string,
+    action: () => Promise<T>,
+    onSuccess?: (result: T) => void
+  ): Promise<void> {
+    await runAction(action, onSuccess, {
+      focusBarcode: false,
+      preserveScroll: true,
+      anchorBarcode: itemBarcode
+    });
   }
 
   function showError(error: unknown): void {
@@ -265,7 +291,7 @@ function App(): JSX.Element {
       return;
     }
 
-    await runAction(() => window.amaneStock.updateNickname(item.barcode, draft), (next) => {
+    await runCardAction(item.barcode, () => window.amaneStock.updateNickname(item.barcode, draft), (next) => {
       setDocument(next);
       setNotice({ type: 'success', text: '昵称已保存。' });
     });
@@ -279,7 +305,7 @@ function App(): JSX.Element {
       return;
     }
 
-    await runAction(() => window.amaneStock.updatePrice(item.barcode, purchasePrice, salePrice, draft.currency), (next) => {
+    await runCardAction(item.barcode, () => window.amaneStock.updatePrice(item.barcode, purchasePrice, salePrice, draft.currency), (next) => {
       setDocument(next);
       setNotice({ type: 'success', text: '价格已保存。' });
     });
@@ -290,7 +316,8 @@ function App(): JSX.Element {
     const nextDraft = { ...draft, currency };
     setPriceDrafts((drafts) => ({ ...drafts, [item.barcode]: nextDraft }));
 
-    await runAction(
+    await runCardAction(
+      item.barcode,
       () =>
         window.amaneStock.updatePrice(
           item.barcode,
@@ -305,8 +332,26 @@ function App(): JSX.Element {
     );
   }
 
+  async function handleQuantityBlur(item: InventoryItem): Promise<void> {
+    const draft = quantityDrafts[item.barcode] ?? String(item.quantityOnHand);
+    const quantity = parseQuantity(draft);
+    if (quantity === null) {
+      setQuantityDrafts((drafts) => ({ ...drafts, [item.barcode]: String(item.quantityOnHand) }));
+      setNotice({ type: 'warning', text: '库存数量必须是大于或等于 0 的整数。' });
+      return;
+    }
+    if (quantity === item.quantityOnHand) {
+      return;
+    }
+
+    await runCardAction(item.barcode, () => window.amaneStock.updateQuantity(item.barcode, quantity), (next) => {
+      setDocument(next);
+      setNotice({ type: 'success', text: `当前库存已调整为 ${quantity}，录入和出库累计未改变。` });
+    });
+  }
+
   async function handleRefreshLookup(item: InventoryItem): Promise<void> {
-    await runAction(() => window.amaneStock.refreshLookup(item.barcode), (result) => {
+    await runCardAction(item.barcode, () => window.amaneStock.refreshLookup(item.barcode), (result) => {
       setDocument(result.document);
       setNotice({ type: result.ok ? 'success' : 'warning', text: result.message });
     });
@@ -318,10 +363,11 @@ function App(): JSX.Element {
       return;
     }
 
-    await runAction(() => window.amaneStock.deleteItem(item.barcode), (next) => {
+    await runCardAction(item.barcode, () => window.amaneStock.deleteItem(item.barcode), (next) => {
       setDocument(next);
       setNicknameDrafts((drafts) => omitKey(drafts, item.barcode));
       setPriceDrafts((drafts) => omitKey(drafts, item.barcode));
+      setQuantityDrafts((drafts) => omitKey(drafts, item.barcode));
       setNotice({ type: 'success', text: '品类已删除。' });
     });
   }
@@ -413,7 +459,7 @@ function App(): JSX.Element {
           </div>
           <div className="brand-copy">
             <strong>Amane Stock Manager</strong>
-            <span>{version ? `v${version}` : 'v0.1.15'}</span>
+            <span>{version ? `v${version}` : 'v0.1.16'}</span>
           </div>
         </div>
 
@@ -740,6 +786,7 @@ function App(): JSX.Element {
                   <article
                     className={`compact-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
                     key={item.barcode}
+                    data-item-barcode={item.barcode}
                     draggable={!busy}
                     onDragStart={(event) => handleDragStart(event, item)}
                     onDragOver={handleDragOver}
@@ -779,6 +826,7 @@ function App(): JSX.Element {
                 <article
                   className={`item-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
                   key={item.barcode}
+                  data-item-barcode={item.barcode}
                   draggable={!busy}
                   onDragStart={(event) => handleDragStart(event, item)}
                   onDragOver={handleDragOver}
@@ -804,21 +852,49 @@ function App(): JSX.Element {
                     <code>{item.barcode}</code>
                   </div>
 
-                  <label className="nickname-field">
-                    <span>昵称</span>
-                    <input
-                      value={nicknameDrafts[item.barcode] ?? ''}
-                      onChange={(event) =>
-                        setNicknameDrafts((drafts) => ({ ...drafts, [item.barcode]: event.target.value }))
-                      }
-                      onBlur={() => handleNicknameBlur(item)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.currentTarget.blur();
+                  <div className="item-edit-row">
+                    <label className="nickname-field">
+                      <span>昵称</span>
+                      <input
+                        value={nicknameDrafts[item.barcode] ?? ''}
+                        onChange={(event) =>
+                          setNicknameDrafts((drafts) => ({ ...drafts, [item.barcode]: event.target.value }))
                         }
-                      }}
-                    />
-                  </label>
+                        onBlur={() => handleNicknameBlur(item)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.currentTarget.blur();
+                          }
+                        }}
+                      />
+                    </label>
+                    <label
+                      className="quantity-field"
+                      title="只调整当前库存，不改变累计录入、累计出库或流水记录"
+                    >
+                      <span>
+                        <PackageCheck size={14} />
+                        当前库存
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        inputMode="numeric"
+                        value={quantityDrafts[item.barcode] ?? String(item.quantityOnHand)}
+                        onChange={(event) =>
+                          setQuantityDrafts((drafts) => ({ ...drafts, [item.barcode]: event.target.value }))
+                        }
+                        onBlur={() => handleQuantityBlur(item)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        aria-label={`调整 ${item.nickname || item.lookupName || item.barcode} 的当前库存`}
+                      />
+                    </label>
+                  </div>
 
                   <div className="price-row">
                     {hidePurchasePrice ? (
@@ -1189,6 +1265,41 @@ function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
   return rest;
 }
 
+function captureScrollSnapshot(anchorBarcode?: string): ScrollSnapshot {
+  const anchor = anchorBarcode ? findItemElement(anchorBarcode) : null;
+  return {
+    scrollY: window.scrollY,
+    anchorBarcode,
+    anchorTop: anchor?.getBoundingClientRect().top
+  };
+}
+
+function restoreScrollSnapshotAfterRender(snapshot: ScrollSnapshot): void {
+  const restore = (): void => {
+    const anchor = snapshot.anchorBarcode ? findItemElement(snapshot.anchorBarcode) : null;
+    const targetScrollY =
+      anchor && typeof snapshot.anchorTop === 'number'
+        ? window.scrollY + anchor.getBoundingClientRect().top - snapshot.anchorTop
+        : snapshot.scrollY;
+    const maximumScrollY = Math.max(0, window.document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo({ left: window.scrollX, top: Math.min(maximumScrollY, Math.max(0, targetScrollY)), behavior: 'auto' });
+  };
+
+  window.requestAnimationFrame(() => {
+    restore();
+    window.requestAnimationFrame(restore);
+  });
+}
+
+function findItemElement(barcode: string): HTMLElement | null {
+  for (const element of window.document.querySelectorAll<HTMLElement>('[data-item-barcode]')) {
+    if (element.dataset.itemBarcode === barcode) {
+      return element;
+    }
+  }
+  return null;
+}
+
 function formatTime(value: string | null): string {
   if (!value) {
     return '-';
@@ -1215,6 +1326,15 @@ function parsePrice(value: string): number | null {
     return null;
   }
   return Math.round(parsed * 100) / 100;
+}
+
+function parseQuantity(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function priceDraftFromItem(item: InventoryItem): PriceDraft {

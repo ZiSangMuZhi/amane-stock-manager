@@ -5,6 +5,7 @@ import {
   submitBarcode,
   updateNickname,
   updatePrice,
+  updateQuantityOnHand,
   updateSortOrder
 } from '../src/shared/inventoryLogic';
 
@@ -47,6 +48,28 @@ describe('inventory logic', () => {
     expect(priced.items['4573102661449']?.priceAmount).toBe(2480.56);
     expect(priced.items['4573102661449']?.salePriceAmount).toBe(3200);
     expect(priced.items['4573102661449']?.priceCurrency).toBe('CAD');
+  });
+
+  it('adjusts current stock without changing intake, outbound, or transaction history', () => {
+    const first = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in', '2026-06-23T12:00:00.000Z', () => 'tx-1');
+    const second = submitBarcode(first.inventory, '4573102661449', 'in', '2026-06-23T12:01:00.000Z', () => 'tx-2');
+    const outbound = submitBarcode(second.inventory, '4573102661449', 'out', '2026-06-23T12:02:00.000Z', () => 'tx-3');
+    const adjusted = updateQuantityOnHand(outbound.inventory, '4573102661449', 12, '2026-06-23T12:03:00.000Z');
+    const item = adjusted.items['4573102661449'];
+
+    expect(item?.quantityOnHand).toBe(12);
+    expect(item?.totalIn).toBe(2);
+    expect(item?.totalOut).toBe(1);
+    expect(item?.lastInAt).toBe('2026-06-23T12:01:00.000Z');
+    expect(item?.lastOutAt).toBe('2026-06-23T12:02:00.000Z');
+    expect(adjusted.transactions).toHaveLength(3);
+  });
+
+  it('rejects invalid manual stock quantities', () => {
+    const stocked = submitBarcode(createInventory('Gunpla'), '4573102661449', 'in');
+
+    expect(() => updateQuantityOnHand(stocked.inventory, '4573102661449', -1)).toThrow('大于或等于 0 的整数');
+    expect(() => updateQuantityOnHand(stocked.inventory, '4573102661449', 1.5)).toThrow('大于或等于 0 的整数');
   });
 
   it('deletes an item category and its transactions', () => {

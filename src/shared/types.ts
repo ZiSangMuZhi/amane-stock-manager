@@ -104,6 +104,7 @@ export interface RendererApi {
     salePriceAmount: number | null,
     priceCurrency: CurrencyCode
   ): Promise<InventoryDocument>;
+  updateQuantity(barcode: string, quantityOnHand: number): Promise<InventoryDocument>;
   updateSortOrder(orderedBarcodes: string[]): Promise<InventoryDocument>;
   deleteItem(barcode: string): Promise<InventoryDocument>;
   refreshLookup(barcode: string): Promise<SubmitBarcodeResult>;

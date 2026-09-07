@@ -258,6 +258,7 @@ button:disabled {
 
 .scan-form input,
 .nickname-field input,
+.quantity-field input,
 .price-field input,
 .currency-field select,
 .modal input {
@@ -278,6 +279,7 @@ button:disabled {
 
 .scan-form input:focus,
 .nickname-field input:focus,
+.quantity-field input:focus,
 .price-field input:focus,
 .currency-field select:focus,
 .modal input:focus {
@@ -773,13 +775,33 @@ button:disabled {
   font-family: "Cascadia Mono", Consolas, monospace;
 }
 
-.nickname-field {
+.item-edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(112px, 0.38fr);
+  gap: 8px;
+  align-items: end;
+  min-width: 0;
+}
+
+.nickname-field,
+.quantity-field {
   display: grid;
   gap: 6px;
   min-width: 0;
   color: #475467;
   font-size: 13px;
   font-weight: 650;
+}
+
+.quantity-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.quantity-field input {
+  padding: 0 10px;
+  font-weight: 500;
 }
 
 .price-row {
@@ -1122,6 +1144,7 @@ dd {
 .app-shell[data-theme="dark"] .item-title span,
 .app-shell[data-theme="dark"] .barcode-line,
 .app-shell[data-theme="dark"] .nickname-field,
+.app-shell[data-theme="dark"] .quantity-field,
 .app-shell[data-theme="dark"] .price-field,
 .app-shell[data-theme="dark"] .currency-field,
 .app-shell[data-theme="dark"] .value-field,
@@ -1174,6 +1197,7 @@ dd {
 
 .app-shell[data-theme="dark"] .scan-form input,
 .app-shell[data-theme="dark"] .nickname-field input,
+.app-shell[data-theme="dark"] .quantity-field input,
 .app-shell[data-theme="dark"] .price-field input,
 .app-shell[data-theme="dark"] .currency-field select,
 .app-shell[data-theme="dark"] .modal input,
@@ -1189,6 +1213,7 @@ dd {
 
 .app-shell[data-theme="dark"] .scan-form input:focus,
 .app-shell[data-theme="dark"] .nickname-field input:focus,
+.app-shell[data-theme="dark"] .quantity-field input:focus,
 .app-shell[data-theme="dark"] .price-field input:focus,
 .app-shell[data-theme="dark"] .currency-field select:focus,
 .app-shell[data-theme="dark"] .modal input:focus {
@@ -1346,6 +1371,7 @@ dd {
   }
 
   .price-row,
+  .item-edit-row,
   .item-stats {
     grid-template-columns: 1fr;
   }

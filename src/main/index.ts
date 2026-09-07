@@ -12,6 +12,7 @@ import {
   toSubmitResult,
   updateNickname,
   updatePrice,
+  updateQuantityOnHand,
   updateSortOrder
 } from '../shared/inventoryLogic';
 import { CurrencyCode, ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
@@ -320,6 +321,15 @@ function registerIpcHandlers(): void {
       });
     }
   );
+
+  ipcMain.handle('inventory:update-quantity', async (_event, barcode: string, quantityOnHand: number) => {
+    return queueInventoryWrite(async () => {
+      const inventory = requireInventory();
+      currentInventory = updateQuantityOnHand(inventory, barcode, quantityOnHand);
+      await saveCurrentInventory();
+      return currentDocument();
+    });
+  });
 
   ipcMain.handle('inventory:update-sort-order', async (_event, orderedBarcodes: string[]) => {
     return queueInventoryWrite(async () => {
@@ -672,7 +682,7 @@ async function downloadUpdateAsset(
   const assetUrl = new URL(safeFileName, updateUrl).toString();
   const response = await fetch(assetUrl, {
     headers: {
-      'User-Agent': 'AmaneStockManager/0.1.15'
+      'User-Agent': 'AmaneStockManager/0.1.16'
     }
   });
   if (!response.ok) {

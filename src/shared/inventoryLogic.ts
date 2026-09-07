@@ -3,6 +3,7 @@ import {
   InventoryItem,
   InventoryMode,
   ProductLookupResult,
+  ShopFields,
   SCHEMA_VERSION,
   SubmitBarcodeResult
 } from './types';
@@ -12,12 +13,17 @@ export function nowIso(): string {
 }
 
 export function normalizeBarcode(raw: string): string {
-  return raw.replace(/[\r\n\t]/g, '').trim();
+  if (typeof raw !== 'string') throw new Error('条码必须是文字。');
+  const value = raw.replace(/[\r\n\t]/g, '').trim();
+  if (value.length > 128 || /[\u0000-\u001f\u007f]/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value)) throw new Error('条码包含无效字符或过长。');
+  return value;
 }
 
 export function createInventory(inventoryName: string, createdAt = nowIso()): InventoryFile {
+  if (!inventoryName.trim() || inventoryName.length > 200) throw new Error('库存名称需要 1–200 个字符。');
   return {
     schemaVersion: SCHEMA_VERSION,
+    inventoryId: crypto.randomUUID(),
     inventoryName,
     createdAt,
     updatedAt: createdAt,
@@ -28,6 +34,8 @@ export function createInventory(inventoryName: string, createdAt = nowIso()): In
 
 export function createInventoryItem(barcode: string, timestamp = nowIso()): InventoryItem {
   return {
+    listed: false,
+    shop: emptyShop(),
     barcode,
     sortIndex: 0,
     nickname: '',
@@ -57,10 +65,48 @@ export function cloneInventory(inventory: InventoryFile): InventoryFile {
   return {
     ...inventory,
     items: Object.fromEntries(
-      Object.entries(inventory.items).map(([barcode, item]) => [barcode, { ...item }])
+      Object.entries(inventory.items).map(([barcode, item]) => [barcode, { ...item, shop: { ...item.shop } }])
     ),
     transactions: inventory.transactions.map((transaction) => ({ ...transaction }))
   };
+}
+
+export function emptyShop(): ShopFields {
+  return { imageId: null, originalCents: 0, currentCents: 0, discountBps: 0, priceSource: 'discount' };
+}
+
+export function canonicalShop(shop: ShopFields): ShopFields {
+  if (!shop || !['current', 'discount'].includes(shop.priceSource) ||
+      ![shop.originalCents, shop.currentCents, shop.discountBps].every(Number.isSafeInteger) ||
+      shop.originalCents < 0 || shop.originalCents > 100000000 || shop.currentCents < 0 || shop.currentCents > 100000000 ||
+      (shop.priceSource === 'current' && shop.currentCents > shop.originalCents) || shop.discountBps < 0 || shop.discountBps > 10000 ||
+      (shop.imageId !== null && !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(shop.imageId))) {
+    throw new Error('商店价格需要有效的 CAD 分金额、0–100% 折扣以及已上传图片。');
+  }
+  return { ...shop,
+    currentCents: shop.priceSource === 'discount' ? Math.round(shop.originalCents * (10000 - shop.discountBps) / 10000) : shop.currentCents,
+    discountBps: !shop.originalCents ? 0 : shop.priceSource === 'current' ? Math.round((shop.originalCents - shop.currentCents) * 10000 / shop.originalCents) : shop.discountBps
+  };
+}
+
+export function updateListing(inventory: InventoryFile, barcode: string, listed: boolean): InventoryFile {
+  if (typeof listed !== 'boolean') throw new Error('无效的上架状态。');
+  const next = cloneInventory(inventory);
+  const item = next.items[normalizeBarcode(barcode)];
+  if (!item) return inventory;
+  item.listed = listed;
+  item.updatedAt = next.updatedAt = nowIso();
+  return next;
+}
+
+export function updateShop(inventory: InventoryFile, barcode: string, shop: ShopFields): InventoryFile {
+  const normalized = canonicalShop(shop);
+  const next = cloneInventory(inventory);
+  const item = next.items[normalizeBarcode(barcode)];
+  if (!item) return inventory;
+  item.shop = normalized;
+  item.updatedAt = next.updatedAt = nowIso();
+  return next;
 }
 
 export function submitBarcode(
@@ -70,12 +116,15 @@ export function submitBarcode(
   timestamp = nowIso(),
   idFactory = cryptoRandomId
 ): { ok: boolean; message: string; inventory: InventoryFile; item?: InventoryItem } {
+  if (mode !== 'in' && mode !== 'out') throw new Error('无效的库存模式。');
   const barcode = normalizeBarcode(rawBarcode);
   if (!barcode) {
     return { ok: false, message: '条码不能为空。', inventory };
   }
 
   const existing = inventory.items[barcode];
+  if (inventory.transactions.length >= 100000 || (!existing && Object.keys(inventory.items).length >= 10000)) throw new Error('库存已达到 10000 个品类或 100000 条流水上限。');
+  if (existing && ((mode === 'in' && (existing.quantityOnHand >= 1000000000 || existing.totalIn >= 1000000000)) || (mode === 'out' && existing.totalOut >= 1000000000))) throw new Error('数量已达到允许上限。');
   if (mode === 'out' && (!existing || existing.quantityOnHand <= 0)) {
     return { ok: false, message: `库存为 0，已阻止出库：${barcode}`, inventory };
   }
@@ -125,6 +174,7 @@ export function updateNickname(
   nickname: string,
   timestamp = nowIso()
 ): InventoryFile {
+  if (typeof nickname !== 'string' || nickname.length > 2000) throw new Error('昵称长度不能超过 2000。');
   const barcode = normalizeBarcode(rawBarcode);
   const next = cloneInventory(inventory);
   const item = next.items[barcode];
@@ -146,6 +196,7 @@ export function updatePrice(
   priceCurrency: InventoryItem['priceCurrency'],
   timestamp = nowIso()
 ): InventoryFile {
+  if (!['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'].includes(priceCurrency)) throw new Error('无效的货币。');
   const barcode = normalizeBarcode(rawBarcode);
   const next = cloneInventory(inventory);
   const item = next.items[barcode];
@@ -167,7 +218,7 @@ export function updateQuantityOnHand(
   quantityOnHand: number,
   timestamp = nowIso()
 ): InventoryFile {
-  if (!Number.isSafeInteger(quantityOnHand) || quantityOnHand < 0) {
+  if (!Number.isSafeInteger(quantityOnHand) || quantityOnHand < 0 || quantityOnHand > 1000000000) {
     throw new Error('库存数量必须是大于或等于 0 的整数。');
   }
 
@@ -241,7 +292,7 @@ export function applyLookupResult(
     item.lookupName = lookup.productName;
     item.brand = lookup.brand;
     item.category = lookup.category;
-    item.imageUrl = lookup.imageUrl;
+    item.imageUrl = /^https?:\/\//i.test(lookup.imageUrl) ? lookup.imageUrl.replace(/^http:/i, 'https:') : '';
   }
   item.lookupSource = lookup.source;
   item.lookupConfidence = lookup.confidence;
@@ -274,9 +325,10 @@ function cryptoRandomId(): string {
 }
 
 function normalizePriceAmount(value: number | null): number | null {
-  if (value === null || !Number.isFinite(value)) {
+  if (value === null) {
     return null;
   }
+  if (!Number.isFinite(value) || value < 0 || value > 1000000000) throw new Error('金额必须是 0–1000000000 之间的有效数字。');
   return Math.max(0, Math.round(value * 100) / 100);
 }
 

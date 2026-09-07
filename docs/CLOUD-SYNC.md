@@ -1,0 +1,21 @@
+# Administrator cloud synchronization
+
+Local inventory remains an offline JSON document. Opening an older file performs a pure v1–v6 migration in memory; the first save writes a recoverable sibling `.backup-...json` containing the original bytes. v7 adds a stable UUID, unlisted-by-default products and separate CAD storefront prices. Future schema versions are rejected. CSV and XLSX retain existing fields and append the public shop fields.
+
+Open the cloud panel, log in with the existing administrator account, and complete the first-password-change form if required. Login alone sends no inventory. **Connect and upload current inventory** authorizes autosync for that exact file and account. **Download and connect** saves the selected cloud book to a chosen local file, backing up an existing destination. A copied JSON `cloudLink` does not authorize upload.
+
+The fixed service is `https://amane-admin-mtjbdhzwkq-uc.a.run.app`. All administrator requests and authenticated images pass through Electron main; redirects and arbitrary endpoints are rejected. Session and CSRF cookies are main-process memory only, with an encrypted token file in Electron userData when OS safeStorage is available. Passwords are never saved. `basic_text` storage is refused; unavailable encryption uses session memory only. IPC checks the app window, exact main frame and renderer URL, with sandbox/context isolation and blocked external navigation.
+
+Sync keeps one job in flight. `stock-sync-journal.json` in userData stores account/file/book binding, acknowledged version/hash and the exact pending request body/key/version **before transmission**. This journal contains private inventory snapshots but no passwords/session/CSRF secrets. Retain it for recovery; do not publish it. Lost responses, 5xx and network errors replay identical bytes after retry/restart. Definitive 400/413 validation rejections allow corrected local content to receive a new request key. New local edits during upload survive and queue another snapshot. Downloads re-check the local hash inside the serialized file-write callback. Each remote replacement creates a sibling backup.
+
+A 409 conflict stops automatic writes. **Back up local and use cloud** preserves local bytes before replacement. **Back up and upload as a new inventory** allocates a fresh UUID and preserves the original cloud book. Renames preserve IDs and the exact pending request while moving the file binding. Switching accounts pauses the old job; logging back into the original account restores its pending request. Logout clears local credentials even when network revocation fails, and reports that server revocation was not confirmed.
+
+Listing is separate from stock and cost. Public CAD original/current price and discount basis points never perform currency conversion. The owned-image picker provides a square crop preview; its explicit upload button requires administrator login. Existing product-lookup images remain separate from owned shop images.
+
+Verification uses synthetic in-memory documents and temporary test directories only; no real local inventory is uploaded. `npm test` covers lost responses/restart, concurrent edits, conflict/backup, failures, account switching/relogin, encryption fallback, sender checks and schema migration. `npm run build` checks production main/preload/renderer compilation. These checks do not establish live-account sync or native runtime acceptance. Packaging and GitHub publication are separate release steps; v0.1.16 assets must remain intact.
+
+Electron API reference: https://www.electronjs.org/docs/latest/api/safe-storage
+
+## Native smoke evidence (2026-09-07)
+
+`scripts/smoke-cloud.cjs` runs real hidden Electron with temporary synthetic userData and intercepted `fetch`. Passed: sandboxed preload/context isolation, renderer login form, zero inventory uploads on login, explicit connection, listing autosync, cloud selector, denial of a second native window's IPC calls, logout and an acknowledged durable journal. All requests in this smoke were in-process test responses. The process exited with code 0 and no smoke process remained. Hidden `capturePage` did not provide a display surface within 2 seconds; there is no screenshot or visual-quality acceptance from this check.

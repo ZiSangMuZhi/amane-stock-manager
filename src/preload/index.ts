@@ -2,6 +2,25 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { CurrencyCode, ExportFormat, InventoryDocument, InventoryMode, RendererApi } from '../shared/types';
 
 const api: RendererApi = {
+  cloudStatus: () => ipcRenderer.invoke('cloud:status'),
+  cloudLogin: (username, password) => ipcRenderer.invoke('cloud:login', username, password),
+  cloudChangePassword: (currentPassword, newPassword) => ipcRenderer.invoke('cloud:password', currentPassword, newPassword),
+  cloudLogout: () => ipcRenderer.invoke('cloud:logout'),
+  cloudBooks: () => ipcRenderer.invoke('cloud:books'),
+  cloudConnect: () => ipcRenderer.invoke('cloud:connect'),
+  cloudDownload: id => ipcRenderer.invoke('cloud:download', id),
+  cloudRetry: () => ipcRenderer.invoke('cloud:retry'),
+  cloudResolve: choice => ipcRenderer.invoke('cloud:resolve', choice),
+  updateListing: (barcode, listed) => ipcRenderer.invoke('inventory:listing', barcode, listed),
+  updateShop: (barcode, shop) => ipcRenderer.invoke('inventory:shop', barcode, shop),
+  chooseShopImage: () => ipcRenderer.invoke('cloud:choose-image'),
+  uploadShopImage: (barcode, dataUrl, crop) => ipcRenderer.invoke('cloud:upload-image', barcode, dataUrl, crop),
+  getShopImage: imageId => ipcRenderer.invoke('cloud:image', imageId),
+  onCloudStatus: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, status: import('../shared/types').CloudStatus) => callback(status);
+    ipcRenderer.on('cloud:status-changed', listener);
+    return () => ipcRenderer.removeListener('cloud:status-changed', listener);
+  },
   getCurrentInventory: () => ipcRenderer.invoke('inventory:get-current'),
   createInventory: () => ipcRenderer.invoke('inventory:create'),
   openInventory: () => ipcRenderer.invoke('inventory:open'),

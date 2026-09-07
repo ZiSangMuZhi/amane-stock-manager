@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { pathToFileURL } from 'node:url';
+import { app, BrowserWindow, dialog, ipcMain as nativeIpcMain, nativeImage, safeStorage, shell } from 'electron';
 import { UpdateInfo, UpdateManager, VelopackApp } from 'velopack';
 import {
   applyLookupResult,
@@ -13,11 +14,14 @@ import {
   updateNickname,
   updatePrice,
   updateQuantityOnHand,
+  updateListing,
+  updateShop,
   updateSortOrder
 } from '../shared/inventoryLogic';
 import { CurrencyCode, ExportFormat, InventoryDocument, InventoryFile, ProductLookupResult, UpdateStatus } from '../shared/types';
 import {
   createInventoryFile,
+  backupInventoryFile,
   normalizeJsonPath,
   readInventoryFile,
   readSettings,
@@ -27,6 +31,10 @@ import {
 } from './fileStore';
 import { defaultExportName, exportInventoryFile } from './exporters';
 import { lookupBarcode } from './productLookup';
+import { CloudClient, ADMIN_ORIGIN } from './cloudClient';
+import { CloudController } from './cloudController';
+import { JournalStore, TokenVault } from './cloudStore';
+import { isTrustedSender } from './trustedIpc';
 
 app.setName('Amane Stock Manager');
 
@@ -48,7 +56,18 @@ let downloadedUpdate: UpdateInfo | null = null;
 let pendingUpdateSource: string | null = null;
 let downloadedUpdateSource: string | null = null;
 let inventoryWriteQueue: Promise<void> = Promise.resolve();
-const lookupTasks = new Set<string>();
+interface LookupTask { filePath: string; inventoryId: string; itemCreatedAt: string; token: symbol }
+const lookupTasks = new Map<string, LookupTask>();
+let cloud: CloudController;
+const rendererUrl = process.env.ELECTRON_RENDERER_URL || pathToFileURL(path.join(__dirname, '../renderer/index.html')).toString();
+const ipcMain = {
+  handle(channel: string, listener: Parameters<typeof nativeIpcMain.handle>[1]): void {
+    nativeIpcMain.handle(channel, (event, ...args) => {
+      if (!isTrustedSender(event, mainWindow?.webContents, mainWindow?.webContents.mainFrame, rendererUrl)) throw new Error('拒绝非应用主窗口的请求。');
+      return listener(event, ...args);
+    });
+  }
+};
 
 function dialogParent(): BrowserWindow {
   if (!mainWindow) {
@@ -86,6 +105,7 @@ async function saveCurrentInventory(): Promise<void> {
   }
   await writeInventoryFile(currentFilePath, currentInventory);
   await writeSettings(app.getPath('userData'), { lastInventoryPath: currentFilePath });
+  cloud?.schedule();
 }
 
 function requireInventory(): InventoryFile {
@@ -118,6 +138,7 @@ async function persistInventoryForPath(filePath: string, inventory: InventoryFil
     currentInventory = inventory;
     await writeInventoryFile(filePath, inventory);
     emitInventoryChanged();
+    cloud?.schedule();
     return;
   }
 
@@ -162,9 +183,12 @@ function createWindow(): void {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
+
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => { if (url !== rendererUrl) event.preventDefault(); });
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -176,7 +200,7 @@ function createWindow(): void {
 function registerIpcHandlers(): void {
   ipcMain.handle('inventory:get-current', () => currentDocument());
 
-  ipcMain.handle('inventory:create', async () => {
+  ipcMain.handle('inventory:create', () => cloud.control(async () => {
     const inventoryDirectory = await getInventoryFilesDirectory();
     const result = await dialog.showSaveDialog(dialogParent(), {
       title: '新建库存文件',
@@ -189,16 +213,20 @@ function registerIpcHandlers(): void {
     }
 
     const filePath = normalizeJsonPath(result.filePath);
-    return queueInventoryWrite(async () => {
+    await cloud.pause();
+    const document = await queueInventoryWrite(async () => {
       const inventoryName = path.basename(filePath, path.extname(filePath));
+      await backupIfExists(filePath);
       currentInventory = await createInventoryFile(filePath, inventoryName);
       currentFilePath = filePath;
       await writeSettings(app.getPath('userData'), { lastInventoryPath: filePath });
       return currentDocument();
     });
-  });
+    await cloud.selectCurrent();
+    return document;
+  }));
 
-  ipcMain.handle('inventory:open', async () => {
+  ipcMain.handle('inventory:open', () => cloud.control(async () => {
     const inventoryDirectory = await getInventoryFilesDirectory();
     const result = await dialog.showOpenDialog(dialogParent(), {
       title: '打开库存文件',
@@ -212,18 +240,25 @@ function registerIpcHandlers(): void {
     }
 
     const filePath = result.filePaths[0];
-    return queueInventoryWrite(async () => {
+    await cloud.pause();
+    const document = await queueInventoryWrite(async () => {
+      const inventory = await readInventoryFile(filePath);
       currentFilePath = filePath;
-      currentInventory = await readInventoryFile(currentFilePath);
+      currentInventory = inventory;
       await writeSettings(app.getPath('userData'), { lastInventoryPath: currentFilePath });
       return currentDocument();
     });
-  });
+    await cloud.selectCurrent();
+    return document;
+  }));
 
-  ipcMain.handle('inventory:rename', async (_event, rawName: string) => {
-    return queueInventoryWrite(async () => {
+  ipcMain.handle('inventory:rename', (_event, rawName: string) => cloud.control(async () => {
+    await cloud.pause();
+    const previousPath = currentFilePath;
+    const document = await queueInventoryWrite(async () => {
       const inventory = requireInventory();
       const safeName = safeInventoryFileName(rawName);
+      if (safeName.length > 200) throw new Error('库存名称不能超过 200 个字符。');
       if (!safeName) {
         throw new Error('库存文件名不能为空。');
       }
@@ -244,6 +279,12 @@ function registerIpcHandlers(): void {
           }
         }
         await fs.rename(oldPath, newPath);
+        for (const [key, task] of lookupTasks) {
+          if (path.normalize(task.filePath).toLowerCase() === path.normalize(oldPath).toLowerCase() && task.inventoryId === inventory.inventoryId) {
+            lookupTasks.delete(key); task.filePath = newPath;
+            lookupTasks.set(lookupTaskKey(key.split('\0').at(-1)!, newPath), task);
+          }
+        }
       }
 
       currentFilePath = newPath;
@@ -251,7 +292,9 @@ function registerIpcHandlers(): void {
       await saveCurrentInventory();
       return currentDocument();
     });
-  });
+    if (previousPath) await cloud.renamed(previousPath);
+    return document;
+  }));
 
   ipcMain.handle('inventory:submit-barcode', async (_event, rawBarcode: string, mode) => {
     const response = await queueInventoryWrite(async () => {
@@ -420,6 +463,86 @@ function registerIpcHandlers(): void {
   ipcMain.handle('app:download-update', downloadUpdate);
   ipcMain.handle('app:apply-update', applyUpdate);
   ipcMain.handle('app:open-path', (_event, filePath: string) => shell.showItemInFolder(filePath));
+
+  ipcMain.handle('cloud:status', () => cloud.snapshot());
+  ipcMain.handle('cloud:login', (_event, username: string, password: string) => cloud.control(() => cloud.login(username, password)));
+  ipcMain.handle('cloud:password', (_event, currentPassword: string, newPassword: string) => cloud.control(() => cloud.changePassword(currentPassword, newPassword)));
+  ipcMain.handle('cloud:logout', () => cloud.control(() => cloud.logout()));
+  ipcMain.handle('cloud:books', () => cloud.control(() => cloud.client.books()));
+  ipcMain.handle('cloud:connect', () => cloud.control(() => cloud.connect()));
+  ipcMain.handle('cloud:download', (_event, id: string) => cloud.control(() => cloud.download(id)));
+  ipcMain.handle('cloud:retry', () => cloud.control(() => cloud.retry()));
+  ipcMain.handle('cloud:resolve', (_event, choice: 'use-cloud' | 'upload-new') => cloud.control(() => cloud.resolve(choice)));
+  ipcMain.handle('inventory:listing', (_event, barcode: string, listed: boolean) => queueInventoryWrite(async () => {
+    currentInventory = updateListing(requireInventory(), barcode, listed); await saveCurrentInventory(); return currentDocument();
+  }));
+  ipcMain.handle('inventory:shop', (_event, barcode: string, shop: import('../shared/types').ShopFields) => queueInventoryWrite(async () => {
+    currentInventory = updateShop(requireInventory(), barcode, shop); await saveCurrentInventory(); return currentDocument();
+  }));
+  ipcMain.handle('cloud:choose-image', async () => {
+    const result = await dialog.showOpenDialog(dialogParent(), { title: '选择有权使用的商品图片', properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const imagePath = result.filePaths[0];
+    if ((await fs.stat(imagePath)).size > 8 * 1024 * 1024) throw new Error('请选择小于 8 MiB 的图片。');
+    const image = nativeImage.createFromBuffer(await fs.readFile(imagePath));
+    if (image.isEmpty()) throw new Error('无法读取这张图片。');
+    const size = image.getSize();
+    if (size.width * size.height > 40_000_000) throw new Error('图片像素过多，请先缩小。');
+    const preview = image.resize({ width: Math.min(size.width, 2000) });
+    return { dataUrl: preview.toDataURL(), ...preview.getSize() };
+  });
+  ipcMain.handle('cloud:upload-image', (_event, barcode: string, dataUrl: string, crop: { x: number; y: number; width: number; height: number }) => cloud.control(async () => {
+    const inventory = requireInventory(), filePath = currentFilePath!, item = inventory.items[barcode];
+    if (!item) throw new Error('商品不存在。');
+    const inventoryId = inventory.inventoryId, incarnation = item.createdAt;
+    const imageId = await cloud.client.uploadImage(dataUrl, crop);
+    await queueInventoryWrite(async () => {
+      const local = await readInventoryForPath(filePath);
+      if (!local || local.inventoryId !== inventoryId || local.items[barcode]?.createdAt !== incarnation) throw new Error('商品或文件已变化，请重新选择图片。');
+      await persistInventoryForPath(filePath, updateShop(local, barcode, { ...local.items[barcode]!.shop, imageId }));
+    });
+    return currentDocument();
+  }));
+  ipcMain.handle('cloud:image', (_event, imageId: string) => cloud.client.image(imageId));
+}
+
+async function backupIfExists(filePath: string): Promise<void> {
+  try { await fs.access(filePath); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  await backupInventoryFile(filePath);
+}
+
+function createCloudController(): CloudController {
+  const directory = app.getPath('userData');
+  const vault = new TokenVault(path.join(directory, 'admin-session.encrypted'), {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    getSelectedStorageBackend: () => process.platform === 'linux' ? safeStorage.getSelectedStorageBackend() : 'os',
+    encryptString: value => safeStorage.encryptString(value), decryptString: value => safeStorage.decryptString(value)
+  });
+  return new CloudController(new CloudClient(vault), new JournalStore(path.join(directory, 'stock-sync-journal.json')), {
+    current: currentDocument, read: filePath => queueInventoryWrite(() => readInventoryForPath(filePath)),
+    emit: status => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status-changed', status); },
+    change: (filePath, inventoryId, update, backup) => queueInventoryWrite(async () => {
+      const local = await readInventoryForPath(filePath);
+      if (!local || local.inventoryId !== inventoryId) throw new Error('库存文件与同步绑定不一致，已停止写入。');
+      const next = update(local);
+      if (backup) await backupInventoryFile(filePath);
+      await writeInventoryFile(filePath, next);
+      if (isCurrentInventoryPath(filePath)) { currentInventory = next; emitInventoryChanged(); }
+    }),
+    download: async record => {
+      const result = await dialog.showSaveDialog(dialogParent(), { title: '保存并连接云端库存', defaultPath: path.join(await getInventoryFilesDirectory(), `${safeInventoryFileName(record.inventory.inventoryName)}.json`), filters: [{ name: 'JSON 库存文件', extensions: ['json'] }] });
+      if (result.canceled || !result.filePath) return { filePath: null, fileName: '', inventory: null };
+      const filePath = normalizeJsonPath(result.filePath);
+      return queueInventoryWrite(async () => {
+        await backupIfExists(filePath);
+        const inventory = { ...record.inventory, cloudLink: { server: ADMIN_ORIGIN, accountId: cloud.client.requireAccount().id, version: record.version, baseHash: '' } };
+        await writeInventoryFile(filePath, inventory);
+        currentFilePath = filePath; currentInventory = inventory;
+        await writeSettings(app.getPath('userData'), { lastInventoryPath: filePath });
+        emitInventoryChanged(); return currentDocument();
+      });
+    }
+  });
 }
 
 function loadingLookupResult(barcode: string): ProductLookupResult {
@@ -465,18 +588,23 @@ function startLookupForFile(barcode: string, filePath: string): boolean {
     return false;
   }
 
-  lookupTasks.add(key);
-  void runLookupForFile(barcode, filePath)
+  const inventory = isCurrentInventoryPath(filePath) ? currentInventory : null;
+  const item = inventory?.items[barcode];
+  if (!inventory || !item) return false;
+  const task: LookupTask = { filePath, inventoryId: inventory.inventoryId, itemCreatedAt: item.createdAt, token: Symbol('lookup') };
+  lookupTasks.set(key, task);
+  void runLookupForFile(barcode, task)
     .catch((error) => {
       console.error('Background barcode lookup failed:', error);
     })
     .finally(() => {
-      lookupTasks.delete(key);
+      const currentKey = lookupTaskKey(barcode, task.filePath);
+      if (lookupTasks.get(currentKey)?.token === task.token) lookupTasks.delete(currentKey);
     });
   return true;
 }
 
-async function runLookupForFile(barcode: string, filePath: string): Promise<void> {
+async function runLookupForFile(barcode: string, task: LookupTask): Promise<void> {
   let lookup: ProductLookupResult;
   try {
     lookup = await lookupBarcode(barcode);
@@ -485,13 +613,13 @@ async function runLookupForFile(barcode: string, filePath: string): Promise<void
   }
 
   await queueInventoryWrite(async () => {
-    const inventory = await readInventoryForPath(filePath);
-    if (!inventory?.items[barcode]) {
+    const inventory = await readInventoryForPath(task.filePath);
+    if (!inventory || inventory.inventoryId !== task.inventoryId || inventory.items[barcode]?.createdAt !== task.itemCreatedAt || lookupTasks.get(lookupTaskKey(barcode, task.filePath))?.token !== task.token) {
       return;
     }
 
     const next = applyLookupResult(inventory, lookup);
-    await persistInventoryForPath(filePath, next);
+    await persistInventoryForPath(task.filePath, next);
   });
 }
 
@@ -730,10 +858,12 @@ function updateErrorStatus(error: unknown): UpdateStatus {
 }
 
 app.whenReady().then(async () => {
+  cloud = createCloudController();
   registerIpcHandlers();
   await getInventoryFilesDirectory();
   await loadLastInventory();
   createWindow();
+  try { await cloud.control(() => cloud.initialize()); } catch (error) { dialog.showErrorBox('云端同步已停止', error instanceof Error ? error.message : '无法读取同步状态。'); }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

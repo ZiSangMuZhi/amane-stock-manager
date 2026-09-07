@@ -36,6 +36,8 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
+import { CloudPanel } from './CloudPanel';
+import { ShopEditor } from './ShopEditor';
 import {
   CurrencyCode,
   ExportFormat,
@@ -523,6 +525,8 @@ function App(): JSX.Element {
         </div>
       </header>
 
+      <CloudPanel document={document} onDocument={setDocument} />
+
       <main className="workspace">
         <section className="control-band">
           <div className="mode-control" aria-label="库存模式">
@@ -821,6 +825,7 @@ function App(): JSX.Element {
                         <Trash2 size={14} />
                       </button>
                     </div>
+                    <ShopEditor item={item} onDocument={setDocument} />
                   </article>
                 ) : (
                 <article
@@ -851,6 +856,8 @@ function App(): JSX.Element {
                     <Barcode size={16} />
                     <code>{item.barcode}</code>
                   </div>
+
+                  <ShopEditor item={item} onDocument={setDocument} />
 
                   <div className="item-edit-row">
                     <label className="nickname-field">

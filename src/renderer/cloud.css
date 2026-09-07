@@ -1,0 +1,27 @@
+.cloud-panel { margin: 14px 24px 0; padding: 12px 16px; border: 1px solid var(--border, #b8bfce); border-radius: 12px; background: var(--surface, rgba(127,127,127,.05)); color: inherit; }
+.cloud-summary { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.cloud-summary > span { flex:1; font-size:13px; min-width:200px; }
+.cloud-panel small,.shop-editor small { font-size:11px; opacity:.75; }
+.cloud-panel button,.shop-editor button { padding:7px 10px; border:1px solid #8d98af66; border-radius:7px; background:transparent; color:inherit; cursor:pointer; }
+.cloud-panel button:disabled,.shop-editor button:disabled { opacity:.5; cursor:default; }
+.cloud-controls { border-top:1px solid #8d98af44; margin-top:12px; padding-top:12px; }
+.cloud-controls form,.cloud-book-actions { display:flex; align-items:end; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+.cloud-controls strong,.cloud-controls p,.cloud-controls small { flex-basis:100%; }
+.cloud-controls label,.shop-price-fields label { display:flex; flex-direction:column; gap:5px; font-size:12px; }
+.cloud-controls input,.cloud-controls select,.shop-editor input[type=number],.shop-editor select { background:transparent; color:inherit; border:1px solid #8d98af77; border-radius:6px; padding:7px; max-width:100%; }
+.cloud-controls option,.shop-editor option { color:#182138; background:#fff; }
+.cloud-progress { display:flex; gap:10px; margin-top:8px; align-items:center; }
+.cloud-conflict { margin-top:10px; padding:10px; border:1px solid #d98c26; border-radius:8px; background:#e6a03b18; }
+.cloud-conflict p,.shop-editor p,.cloud-book-actions p { font-size:12px; margin:0 0 8px; }
+.cloud-conflict button + button { margin-left:8px; }
+.cloud-error { color:#c64b50; font-size:12px; margin:8px 0 0; overflow-wrap:anywhere; }
+.shop-editor { width:100%; min-width:0; border-top:1px solid #8d98af33; padding-top:8px; margin-top:8px; font-size:12px; }
+.shop-listing { display:flex; gap:6px; align-items:center; }
+.shop-editor summary { cursor:pointer; padding:7px 0; }
+.shop-price-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
+.shop-owned-thumb { width:60px; height:60px; object-fit:cover; display:block; margin:8px 0; border-radius:6px; }
+.shop-crop { display:flex; flex-direction:column; gap:7px; margin-top:12px; }
+.shop-crop-preview { width:180px; height:180px; position:relative; overflow:hidden; border-radius:8px; background:#e4e7eb; }
+.shop-crop-preview img { position:absolute; max-width:none; object-fit:fill; }
+.shop-crop label { display:flex; align-items:center; gap:8px; }
+.compact-card > .shop-editor { grid-column:1/-1; }

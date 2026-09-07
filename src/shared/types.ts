@@ -1,4 +1,27 @@
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
+
+export interface ShopFields {
+  imageId: string | null;
+  originalCents: number;
+  currentCents: number;
+  discountBps: number;
+  priceSource: 'discount' | 'current';
+}
+
+export interface CloudLink { server: string; accountId: string; version: number; baseHash: string }
+export interface CloudAccount { id: string; username: string; displayName: string; mustChangePassword: boolean; permissions: string[] }
+export interface StockSummary { id: string; name: string; version: number; itemCount: number; quantityOnHand: number; updatedAt: string }
+export interface StockRecord { id: string; version: number; inventory: InventoryFile; updatedAt: string }
+export interface CloudStatus {
+  state: 'local-only' | 'queued' | 'uploading' | 'downloading' | 'synced' | 'offline' | 'error' | 'expired' | 'conflict';
+  message: string;
+  account: CloudAccount | null;
+  secureStorage: boolean;
+  connected: boolean;
+  pending: boolean;
+  lastSuccess: string | null;
+  payloadBytes?: number;
+}
 
 export type InventoryMode = 'in' | 'out';
 export type LookupStatus = 'idle' | 'loading' | 'found' | 'not_found' | 'error';
@@ -7,6 +30,8 @@ export type ProductLookupSource = 'upcitemdb' | 'openfoodfacts' | 'web_search' |
 export type CurrencyCode = 'CAD' | 'JPY' | 'USD' | 'CNY' | 'EUR' | 'GBP' | 'TWD' | 'HKD';
 
 export interface InventoryItem {
+  listed: boolean;
+  shop: ShopFields;
   barcode: string;
   sortIndex: number;
   nickname: string;
@@ -44,6 +69,8 @@ export interface InventoryTransaction {
 
 export interface InventoryFile {
   schemaVersion: typeof SCHEMA_VERSION;
+  inventoryId: string;
+  cloudLink?: CloudLink;
   inventoryName: string;
   createdAt: string;
   updatedAt: string;
@@ -92,6 +119,21 @@ export interface UpdateStatus {
 }
 
 export interface RendererApi {
+  cloudStatus(): Promise<CloudStatus>;
+  cloudLogin(username: string, password: string): Promise<CloudStatus>;
+  cloudChangePassword(currentPassword: string, newPassword: string): Promise<CloudStatus>;
+  cloudLogout(): Promise<CloudStatus>;
+  cloudBooks(): Promise<StockSummary[]>;
+  cloudConnect(): Promise<CloudStatus>;
+  cloudDownload(id: string): Promise<InventoryDocument>;
+  cloudRetry(): Promise<CloudStatus>;
+  cloudResolve(choice: 'use-cloud' | 'upload-new'): Promise<InventoryDocument>;
+  onCloudStatus(callback: (status: CloudStatus) => void): () => void;
+  updateListing(barcode: string, listed: boolean): Promise<InventoryDocument>;
+  updateShop(barcode: string, shop: ShopFields): Promise<InventoryDocument>;
+  chooseShopImage(): Promise<{ dataUrl: string; width: number; height: number } | null>;
+  uploadShopImage(barcode: string, dataUrl: string, crop: { x: number; y: number; width: number; height: number }): Promise<InventoryDocument>;
+  getShopImage(imageId: string): Promise<string>;
   getCurrentInventory(): Promise<InventoryDocument>;
   createInventory(): Promise<InventoryDocument>;
   openInventory(): Promise<InventoryDocument>;

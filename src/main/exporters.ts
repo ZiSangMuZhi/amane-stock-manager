@@ -27,7 +27,8 @@ const ITEM_HEADERS = [
   'firstInAt',
   'lastInAt',
   'lastOutAt',
-  'lookupUpdatedAt'
+  'lookupUpdatedAt',
+  'listed', 'shopCurrency', 'shopOriginalCents', 'shopCurrentCents', 'shopDiscountBps', 'shopPriceSource', 'shopImageId'
 ];
 
 const TRANSACTION_HEADERS = [
@@ -97,7 +98,9 @@ function itemRows(inventory: InventoryFile): Array<Record<string, string | numbe
     firstInAt: item.firstInAt ?? '',
     lastInAt: item.lastInAt ?? '',
     lastOutAt: item.lastOutAt ?? '',
-    lookupUpdatedAt: item.lookupUpdatedAt ?? ''
+    lookupUpdatedAt: item.lookupUpdatedAt ?? '',
+    listed: item.listed ? 'true' : 'false', shopCurrency: 'CAD', shopOriginalCents: item.shop.originalCents,
+    shopCurrentCents: item.shop.currentCents, shopDiscountBps: item.shop.discountBps, shopPriceSource: item.shop.priceSource, shopImageId: item.shop.imageId ?? ''
   }));
 }
 

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createInventory } from '../shared/inventoryLogic';
+import { canonicalShop, createInventory, emptyShop } from '../shared/inventoryLogic';
+import { createHash } from 'node:crypto';
 import {
   InventoryFile,
   InventoryItem,
@@ -33,6 +34,12 @@ export async function readInventoryFile(filePath: string): Promise<InventoryFile
 }
 
 export async function writeInventoryFile(filePath: string, inventory: InventoryFile): Promise<void> {
+  try {
+    const old: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'));
+    if (isObject(old) && (typeof old.schemaVersion !== 'number' || old.schemaVersion < SCHEMA_VERSION)) await backupInventoryFile(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(tmpPath, `${JSON.stringify(inventory, null, 2)}\n`, 'utf-8');
@@ -66,14 +73,20 @@ function settingsPath(userDataPath: string): string {
   return path.join(userDataPath, 'settings.json');
 }
 
-function migrateInventory(value: unknown, fallbackName: string): InventoryFile {
+export function migrateInventory(value: unknown, fallbackName: string): InventoryFile {
   if (!isObject(value)) {
     throw new Error('库存文件不是有效的 JSON 对象。');
   }
 
+  if (typeof value.schemaVersion === 'number' && value.schemaVersion > SCHEMA_VERSION) {
+    throw new Error(`此文件使用较新格式 v${value.schemaVersion}，请更新应用。`);
+  }
+  if (value.schemaVersion !== undefined && (!Number.isInteger(value.schemaVersion) || Number(value.schemaVersion) < 1)) throw new Error('库存版本无效。');
+  if (value.schemaVersion === SCHEMA_VERSION && (typeof value.inventoryId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.inventoryId))) throw new Error('此 v7 库存缺少有效的稳定标识。');
+
   const now = new Date().toISOString();
   const rawItems = isObject(value.items) ? value.items : {};
-  const migratedItems = Object.entries(rawItems).map(([barcode, item]) => migrateItem(barcode, item, now));
+  const migratedItems = Object.entries(rawItems).map(([barcode, item]) => migrateItem(barcode, item, now, value.schemaVersion === SCHEMA_VERSION));
   const hasStoredSort = migratedItems.some((item) => item.sortIndex !== Number.MAX_SAFE_INTEGER);
   const orderedItems = hasStoredSort
     ? migratedItems.sort(compareItemSort)
@@ -83,6 +96,10 @@ function migrateInventory(value: unknown, fallbackName: string): InventoryFile {
 
   return {
     schemaVersion: SCHEMA_VERSION,
+    inventoryId: typeof value.inventoryId === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value.inventoryId)
+      ? value.inventoryId : legacyInventoryId(value),
+    ...(isObject(value.cloudLink) && typeof value.cloudLink.server === 'string' && typeof value.cloudLink.accountId === 'string' &&
+      typeof value.cloudLink.version === 'number' && typeof value.cloudLink.baseHash === 'string' ? { cloudLink: value.cloudLink as unknown as InventoryFile['cloudLink'] } : {}),
     inventoryName: asString(value.inventoryName, fallbackName),
     createdAt: asString(value.createdAt, now),
     updatedAt: asString(value.updatedAt, now),
@@ -91,19 +108,25 @@ function migrateInventory(value: unknown, fallbackName: string): InventoryFile {
   };
 }
 
-function migrateItem(barcodeFromKey: string, value: unknown, now: string): InventoryItem {
+function migrateItem(barcodeFromKey: string, value: unknown, now: string, isV7: boolean): InventoryItem {
   const item = isObject(value) ? value : {};
   const barcode = asString(item.barcode, barcodeFromKey);
   const status = asString(item.lookupStatus, 'idle') as LookupStatus;
 
   return {
+    listed: isV7 && item.listed === true,
+    shop: isV7 && isObject(item.shop) ? canonicalShop(item.shop as unknown as InventoryItem['shop']) : {
+      ...emptyShop(),
+      originalCents: asCurrencyCode(item.priceCurrency) === 'CAD' ? Math.round((asNullableNonNegativeNumber(item.salePriceAmount) ?? 0) * 100) : 0,
+      currentCents: asCurrencyCode(item.priceCurrency) === 'CAD' ? Math.round((asNullableNonNegativeNumber(item.salePriceAmount) ?? 0) * 100) : 0
+    },
     barcode,
     sortIndex: asSortIndex(item.sortIndex),
     nickname: asString(item.nickname, ''),
     lookupName: asString(item.lookupName, ''),
     brand: asString(item.brand, ''),
     category: asString(item.category, ''),
-    imageUrl: asString(item.imageUrl, ''),
+    imageUrl: asString(item.imageUrl, '').replace(/^http:\/\//i, 'https://'),
     priceAmount: asNullableNonNegativeNumber(item.priceAmount),
     salePriceAmount: asNullableNonNegativeNumber(item.salePriceAmount),
     priceCurrency: asCurrencyCode(item.priceCurrency),
@@ -120,6 +143,21 @@ function migrateItem(barcodeFromKey: string, value: unknown, now: string): Inven
     createdAt: asString(item.createdAt, now),
     updatedAt: asString(item.updatedAt, now)
   };
+}
+
+// Pure migration: the same legacy document receives the same identity without changing its source file.
+function legacyInventoryId(value: Record<string, unknown>): string {
+  const hex = createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-5${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}`;
+}
+
+export async function backupInventoryFile(filePath: string): Promise<string> {
+  const backupPath = `${filePath}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}.json`;
+  const bytes = await fs.readFile(filePath);
+  const tempPath = `${backupPath}.tmp`;
+  await fs.writeFile(tempPath, bytes, { flag: 'wx' });
+  await fs.rename(tempPath, backupPath);
+  return backupPath;
 }
 
 function migrateTransaction(value: unknown, index: number, now: string): InventoryTransaction {

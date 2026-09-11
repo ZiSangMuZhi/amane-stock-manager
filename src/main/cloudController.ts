@@ -115,7 +115,7 @@ export class CloudController {
   async renamed(oldPath: string): Promise<void> {
     if (this.engine && samePath(this.engine.journal.filePath, oldPath)) {
       const document = this.host.current();
-      if (!document.filePath || document.inventory?.inventoryId !== this.engine.journal.inventoryId) throw new Error('库存重命名绑定不一致。');
+      if (!document.filePath || !document.inventory || ![this.engine.journal.inventoryId, this.engine.journal.replacement?.inventoryId].includes(document.inventory.inventoryId)) throw new Error('库存重命名绑定不一致。');
       this.engine.journal.filePath = path.resolve(document.filePath);
       await this.journals.save(this.engine.journal, oldPath);
     }

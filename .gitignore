@@ -2,6 +2,7 @@ node_modules/
 out/
 dist/
 dist-packaged/
+artifacts/
 Releases/
 *.log
 .DS_Store

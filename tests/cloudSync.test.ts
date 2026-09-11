@@ -8,14 +8,14 @@ function harness(version = 0) {
   let local = submitBarcode(createInventory('Synthetic test inventory'), '123456', 'in').inventory;
   const journal: SyncJournal = { accountId: 'account-a', filePath: 'C:/synthetic/a.json', inventoryId: local.inventoryId, version, baseHash: version ? inventoryHash(local) : '', pending: null, conflict: false, lastSuccess: null };
   let persisted = structuredClone(journal), backups = 0;
-  const calls: { method: string; body?: string }[] = [], states: string[] = [];
+  const calls: { method: string; id: string; body?: string }[] = [], states: string[] = [];
   const remote = (inventory = local, currentVersion = 1): StockRecord => ({ id: inventory.inventoryId, inventory: structuredClone(inventory), version: currentVersion, updatedAt: new Date().toISOString() });
   let handler: SyncAdapter['request'] = async (_method, _id, body) => remote(body ? JSON.parse(body).inventory : local, journal.version + 1);
   const adapter: SyncAdapter = {
     server: 'https://admin.invalid', read: async () => structuredClone(local),
     change: async (_path, id, update, backup) => { if (id !== local.inventoryId) throw new Error('binding mismatch'); if (backup) backups++; local = update(local); },
     save: async j => { persisted = structuredClone(j); },
-    request: async (method, id, body) => { calls.push({ method, body }); return handler(method, id, body); },
+    request: async (method, id, body) => { calls.push({ method, id, body }); return handler(method, id, body); },
     report: state => { states.push(state); }
   };
   const engine = new SyncEngine(journal, adapter);
@@ -102,7 +102,7 @@ describe('durable single-flight synchronization (synthetic documents only)', () 
   it('persists version conflicts and never automatically retries a conflicting snapshot', async () => {
     const h = harness(); h.handle(async () => { throw new CloudError('conflict', 409); });
     await h.engine.run(); const restarted = new SyncEngine(h.persisted, h.adapter); await restarted.run();
-    expect(h.calls).toHaveLength(1); expect(h.persisted.conflict).toBe(true); expect(h.persisted.pending).not.toBeNull();
+    expect(h.calls.map(call => call.method)).toEqual(['POST', 'GET']); expect(h.persisted.conflict).toBe(true); expect(h.persisted.pending).not.toBeNull();
   });
 
   it('backs up before the explicit use-cloud conflict choice', async () => {
@@ -152,5 +152,169 @@ describe('durable single-flight synchronization (synthetic documents only)', () 
     await Promise.resolve(); expect(paused).toBe(false);
     gate.resolve(h.remote()); await Promise.all([flight, pause]);
     await h.engine.run(); expect(h.calls).toHaveLength(1);
+  });
+});
+
+describe('automatic upload when the connected cloud inventory was deleted', () => {
+  const missing = (status = 410) => new CloudError('stock absent', status, false, true);
+
+  it.each([404, 410])('backs up and recreates a clean local file after an explicit GET %i', async status => {
+    const h = harness(3), before = structuredClone(h.local), oldId = before.inventoryId;
+    h.local = { ...h.local, cloudLink: { server: h.adapter.server, accountId: 'account-a', version: 3, baseHash: h.journal.baseHash } };
+    h.handle(async (method, id, body) => {
+      if (id === oldId) throw missing(status);
+      expect(method).toBe('POST'); expect(h.persisted.pending?.body).toBe(body);
+      expect(h.persisted.inventoryId).toBe(id);
+      return h.remote(JSON.parse(body!).inventory);
+    });
+    await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['GET', 'POST']);
+    expect(h.local.inventoryId).not.toBe(oldId); expect(h.backups).toBe(1);
+    expect(h.local.inventoryName).toBe(before.inventoryName);
+    expect(h.local.items).toEqual(before.items); expect(h.local.transactions).toEqual(before.transactions);
+    expect(JSON.parse(h.calls[1]!.body!).inventory.cloudLink).toBeUndefined();
+    expect(JSON.parse(h.calls[1]!.body!).version).toBeUndefined();
+    expect(h.persisted).toMatchObject({ inventoryId: h.local.inventoryId, version: 1, pending: null, conflict: false });
+    expect(h.states.at(-1)).toBe('synced');
+  });
+
+  it('uploads the latest edits after a PUT fails, then continues versioned synchronization', async () => {
+    const h = harness(2), oldId = h.local.inventoryId;
+    h.local = submitBarcode(h.local, '123456', 'in').inventory;
+    h.handle(async (method, id, body) => {
+      if (id === oldId) {
+        if (method === 'PUT') h.local = updateNickname(h.local, '123456', 'edited during request');
+        throw missing();
+      }
+      return h.remote(JSON.parse(body!).inventory, method === 'POST' ? 1 : 2);
+    });
+    await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['PUT', 'GET', 'POST']);
+    const created = JSON.parse(h.calls[2]!.body!).inventory;
+    expect(created.items['123456']).toMatchObject({ quantityOnHand: 2, nickname: 'edited during request' });
+    expect(created.transactions).toEqual(h.local.transactions);
+    h.local = submitBarcode(h.local, '123456', 'in').inventory;
+    await h.engine.run();
+    expect(h.calls.at(-1)?.method).toBe('PUT'); expect(JSON.parse(h.calls.at(-1)!.body!).version).toBe(1);
+    expect(h.backups).toBe(1); expect(h.local.items['123456']!.quantityOnHand).toBe(3);
+  });
+
+  it('replays the exact new POST after its response is lost and the engine restarts', async () => {
+    const h = harness(1), oldId = h.local.inventoryId; let committed: StockRecord | undefined;
+    h.handle(async (_method, id, body) => {
+      if (id === oldId) throw missing();
+      committed = h.remote(JSON.parse(body!).inventory);
+      throw new Error('lost after new book committed');
+    });
+    await h.engine.run();
+    const create = h.calls[1]!, newId = h.local.inventoryId;
+    expect(h.persisted.pending?.body).toBe(create.body);
+    h.local = submitBarcode(h.local, '123456', 'in').inventory;
+    const restarted = new SyncEngine(h.persisted, h.adapter);
+    h.handle(async (method, id, body) => {
+      expect(id).toBe(newId);
+      if (method === 'POST') { expect(body).toBe(create.body); return committed!; }
+      return h.remote(JSON.parse(body!).inventory, 2);
+    });
+    await restarted.run();
+    expect(h.calls.map(call => call.method)).toEqual(['GET', 'POST', 'POST', 'PUT']);
+    expect(h.local.inventoryId).toBe(newId); expect(h.backups).toBe(1);
+    expect(h.persisted.version).toBe(2); expect(h.persisted.pending).toBeNull();
+  });
+
+  it.each(['before-local-write', 'after-local-write'])('resumes the same durable replacement ID after a crash %s', async stage => {
+    const h = harness(1), oldId = h.local.inventoryId, originalSave = h.adapter.save, originalChange = h.adapter.change;
+    h.handle(async (_method, id, body) => { if (id === oldId) throw missing(); return h.remote(JSON.parse(body!).inventory); });
+    if (stage === 'before-local-write') h.adapter.change = async () => { throw new Error('local disk unavailable'); };
+    else h.adapter.save = async value => { if (!value.replacement && value.inventoryId !== oldId) throw new Error('journal disk unavailable'); await originalSave(value); };
+    await h.engine.run();
+    const intendedId = h.persisted.replacement!.inventoryId;
+    expect(h.calls.map(call => call.method)).toEqual(['GET']);
+    expect(h.local.inventoryId).toBe(stage === 'before-local-write' ? oldId : intendedId);
+    h.adapter.change = originalChange; h.adapter.save = originalSave;
+    const restarted = new SyncEngine(h.persisted, h.adapter); await restarted.run();
+    expect(h.local.inventoryId).toBe(intendedId); expect(h.persisted.replacement).toBeUndefined();
+    expect(h.calls.at(-1)?.id).toBe(intendedId); expect(h.backups).toBe(1);
+    expect(h.states.at(-1)).toBe('synced');
+  });
+
+  it('does not change the local identity when saving the recovery intent fails', async () => {
+    const h = harness(1), before = structuredClone(h.local);
+    h.handle(async () => { throw missing(); }); h.adapter.save = async () => { throw new Error('journal unavailable'); };
+    await h.engine.run();
+    expect(h.local).toEqual(before); expect(h.journal.replacement).toBeUndefined(); expect(h.backups).toBe(0);
+  });
+
+  it('persists the same pending create before retrying after a failed journal write', async () => {
+    const h = harness(1), oldId = h.local.inventoryId, save = h.adapter.save;
+    let rejectPendingSave = true;
+    h.adapter.save = async value => {
+      if (value.pending?.method === 'POST' && rejectPendingSave) throw new Error('disk full before send');
+      await save(value);
+    };
+    h.handle(async (_method, id, body) => {
+      if (id === oldId) throw missing();
+      expect(h.persisted.pending?.body).toBe(body);
+      return h.remote(JSON.parse(body!).inventory);
+    });
+    await h.engine.run();
+    const pending = structuredClone(h.journal.pending);
+    expect(pending?.method).toBe('POST'); expect(h.persisted.pending).toBeNull(); expect(h.calls).toHaveLength(1);
+    rejectPendingSave = false; await h.engine.run();
+    expect(h.calls[1]?.body).toBe(pending?.body); expect(h.states.at(-1)).toBe('synced'); expect(h.backups).toBe(1);
+  });
+
+  it('checks whether a create conflict refers to a deleted book before uploading under a new ID', async () => {
+    const h = harness(), oldId = h.local.inventoryId;
+    h.handle(async (method, id, body) => {
+      if (id === oldId) { if (method === 'POST') throw new CloudError('already exists', 409); throw missing(); }
+      return h.remote(JSON.parse(body!).inventory);
+    });
+    await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['POST', 'GET', 'POST']);
+    expect(h.persisted.conflict).toBe(false); expect(h.states.at(-1)).toBe('synced');
+  });
+
+  it('keeps an old tombstoned request as a conflict if the same cloud ID is active again', async () => {
+    const h = harness(2), oldId = h.local.inventoryId;
+    h.local = updateNickname(h.local, '123456', 'local edit');
+    h.handle(async method => { if (method === 'PUT') throw missing(); return h.remote(h.local, 1); });
+    await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['PUT', 'GET']);
+    expect(h.local.inventoryId).toBe(oldId); expect(h.backups).toBe(0); expect(h.persisted.conflict).toBe(true);
+  });
+
+  it.each([401, 403, 404, 410, 429, 500])('never reallocates an ID for unconfirmed HTTP %i errors', async status => {
+    const h = harness(1), oldId = h.local.inventoryId;
+    h.handle(async () => { throw new CloudError('unconfirmed response', status); }); await h.engine.run();
+    expect(h.local.inventoryId).toBe(oldId); expect(h.calls).toHaveLength(1); expect(h.backups).toBe(0);
+  });
+
+  it('keeps the pending request when confirming a write failure is blocked by network loss', async () => {
+    const h = harness(1), oldId = h.local.inventoryId; h.local = updateNickname(h.local, '123456', 'edit');
+    h.handle(async method => { if (method === 'PUT') throw missing(); throw new Error('offline probe'); }); await h.engine.run();
+    expect(h.local.inventoryId).toBe(oldId); expect(h.persisted.pending?.body).toBe(h.calls[0]!.body);
+    expect(h.states.at(-1)).toBe('offline'); expect(h.backups).toBe(0);
+  });
+
+  it.each([401, 403, 404])('preserves the old request when the confirming GET fails with unconfirmed HTTP %i', async status => {
+    const h = harness(1), oldId = h.local.inventoryId; h.local = updateNickname(h.local, '123456', 'edit');
+    h.handle(async method => { if (method === 'PUT') throw missing(); throw new CloudError('probe denied', status); }); await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['PUT', 'GET']); expect(h.local.inventoryId).toBe(oldId);
+    expect(h.persisted.pending?.body).toBe(h.calls[0]!.body); expect(h.backups).toBe(0);
+    expect(h.states.at(-1)).toBe(status === 401 ? 'expired' : 'error');
+  });
+
+  it('refuses to complete a saved replacement over a third inventory placed at the same path', async () => {
+    const h = harness(1); h.journal.replacement = { inventoryId: createInventory('intended').inventoryId };
+    h.local = createInventory('unrelated replacement'); const before = structuredClone(h.local);
+    await h.engine.run();
+    expect(h.local).toEqual(before); expect(h.calls).toHaveLength(0); expect(h.backups).toBe(0);
+  });
+
+  it('limits recovery to one new identity per run if the replacement is immediately deleted too', async () => {
+    const h = harness(1); h.handle(async () => { throw missing(); }); await h.engine.run();
+    expect(h.calls.map(call => call.method)).toEqual(['GET', 'POST']); expect(h.backups).toBe(1);
+    expect(h.persisted.pending?.method).toBe('POST'); expect(h.states.at(-1)).toBe('error');
   });
 });

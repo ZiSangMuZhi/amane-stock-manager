@@ -52,14 +52,14 @@ export class JournalStore {
   }
   find(accountId: string, filePath: string, inventoryId: string): SyncJournal | undefined {
     if (!this.loaded) throw new Error('同步日志尚未成功载入，不能建立新连接。');
-    const found = this.entries.find(j => j.accountId === accountId && samePath(j.filePath, filePath) && j.inventoryId === inventoryId);
+    const found = this.entries.find(j => j.accountId === accountId && samePath(j.filePath, filePath) && (j.inventoryId === inventoryId || j.replacement?.inventoryId === inventoryId));
     return found ? structuredClone(found) : undefined;
   }
   save(journal: SyncJournal, oldPath?: string): Promise<void> {
     if (!this.loaded) return Promise.reject(new Error('同步日志尚未成功载入，已阻止覆盖原日志。'));
     const snapshot = structuredClone(journal);
     const task = this.queue.then(async () => {
-      const next = this.entries.filter(j => !(j.accountId === snapshot.accountId && j.inventoryId === snapshot.inventoryId && (samePath(j.filePath, snapshot.filePath) || (oldPath && samePath(j.filePath, oldPath)))));
+      const next = this.entries.filter(j => !(j.accountId === snapshot.accountId && (j.inventoryId === snapshot.inventoryId || j.replacement?.inventoryId === snapshot.inventoryId) && (samePath(j.filePath, snapshot.filePath) || (oldPath && samePath(j.filePath, oldPath)))));
       next.push(snapshot);
       await atomicWrite(this.filePath, JSON.stringify(next));
       this.entries = next;

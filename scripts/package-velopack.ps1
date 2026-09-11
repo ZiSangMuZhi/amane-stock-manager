@@ -28,8 +28,15 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\.-]+)?$') {
   throw "Velopack requires a SemVer2 version such as 1.2.3. Received: $Version"
 }
 
-if ([string]::IsNullOrWhiteSpace($UpdateChannel)) {
-  throw "UpdateChannel cannot be empty."
+if ($Version -ne $Package.version) {
+  throw "The release version must match package.json ($($Package.version)); update the application version before packaging."
+}
+if ($Runtime -ne "win-x64") {
+  throw "package:win builds Windows x64; Runtime must be win-x64."
+}
+
+if ($UpdateChannel -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+  throw "UpdateChannel must be a simple channel name such as win."
 }
 
 if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and [string]::IsNullOrWhiteSpace($UpdateUrl)) {
@@ -42,16 +49,32 @@ $env:AMANE_UPDATE_URL = $UpdateUrl
 $env:AMANE_UPDATE_CHANNEL = $UpdateChannel
 
 Write-Host "Building Electron package..."
+$BuildStartedAt = [DateTime]::UtcNow
 npm run package:win
+if ($LASTEXITCODE -ne 0) {
+  throw "Electron build/package failed with exit code $LASTEXITCODE; existing output will not be released."
+}
 
 Write-Host "Restoring local Velopack CLI..."
 dotnet tool restore
+if ($LASTEXITCODE -ne 0) {
+  throw "Velopack CLI restore failed with exit code $LASTEXITCODE; packaging has stopped."
+}
 
 $PackDir = Join-Path $Root "dist-packaged\Amane Stock Manager-win32-x64"
 $MainExe = "Amane Stock Manager.exe"
 $MainExePath = Join-Path $PackDir $MainExe
 if (!(Test-Path -LiteralPath $MainExePath)) {
   throw "Packaged executable not found: $MainExePath"
+}
+$ManifestPath = Join-Path $Root "dist-packaged\package-manifest.json"
+if (!(Test-Path -LiteralPath $ManifestPath) -or (Get-Item -LiteralPath $ManifestPath).LastWriteTimeUtc -lt $BuildStartedAt) {
+  throw "The current build did not produce a fresh audited package manifest."
+}
+$Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$PackagedPackage = Get-Content -LiteralPath (Join-Path $PackDir "resources\app\package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($Manifest.version -ne $Version -or $PackagedPackage.version -ne $Version) {
+  throw "Packaged application metadata does not match release version $Version."
 }
 
 $UninstallerPath = Join-Path $PackDir "Uninstall Amane Stock Manager.cmd"
@@ -74,11 +97,16 @@ exit /b 1
 Set-Content -LiteralPath $UninstallerPath -Value $UninstallerContent -Encoding ASCII
 
 $OutputDir = Join-Path $Root "Releases"
+# PowerShell 5 reports OneDrive cloud placeholders as ReparsePoint as well.
+# Node checks links and real target paths without rejecting normal cloud files.
+node (Join-Path $Root "scripts\package-win.mjs") --check-release-directory
+if ($LASTEXITCODE -ne 0) {
+  throw "Release output path verification failed with exit code $LASTEXITCODE."
+}
 if ($CleanOutput -and (Test-Path -LiteralPath $OutputDir)) {
-  $ResolvedRoot = [System.IO.Path]::GetFullPath($Root)
   $ResolvedOutput = [System.IO.Path]::GetFullPath($OutputDir)
-  if (!$ResolvedOutput.StartsWith($ResolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
-      !([System.IO.Path]::GetFileName($ResolvedOutput).Equals("Releases", [System.StringComparison]::OrdinalIgnoreCase))) {
+  $ExpectedOutput = [System.IO.Path]::GetFullPath((Join-Path $Root "Releases"))
+  if (!$ResolvedOutput.Equals($ExpectedOutput, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to clean unexpected output directory: $ResolvedOutput"
   }
   Remove-Item -LiteralPath $ResolvedOutput -Recurse -Force
@@ -98,7 +126,7 @@ if (![string]::IsNullOrWhiteSpace($GithubRepoUrl) -and !$CleanOutput) {
   Write-Host "Downloading latest GitHub release assets for delta generation..."
   & dotnet @DownloadArgs
   if ($LASTEXITCODE -ne 0) {
-    Write-Warning "No prior GitHub release assets were downloaded. Continuing with local release files."
+    throw "Previous GitHub release download failed with exit code $LASTEXITCODE; no new release will be packed or uploaded."
   }
 }
 
@@ -125,6 +153,7 @@ if ($Msi) {
 }
 
 Write-Host "Packing Velopack release $Version..."
+$PackStartedAt = [DateTime]::UtcNow
 & dotnet @VpkArgs
 if ($LASTEXITCODE -ne 0) {
   throw "Velopack packaging failed with exit code $LASTEXITCODE"
@@ -137,12 +166,27 @@ $CompatibilityFeedNames = @("releases.win-x64.json", "releases.stable.json", "re
   Select-Object -Unique
 $CompatibilityFeedPaths = @()
 
-if (Test-Path -LiteralPath $ReleaseFeedPath) {
-  foreach ($FeedName in $CompatibilityFeedNames) {
-    $FeedPath = Join-Path $OutputDir $FeedName
-    Copy-Item -LiteralPath $ReleaseFeedPath -Destination $FeedPath -Force
-    $CompatibilityFeedPaths += $FeedPath
-  }
+if (!(Test-Path -LiteralPath $ReleaseFeedPath) -or (Get-Item -LiteralPath $ReleaseFeedPath).LastWriteTimeUtc -lt $PackStartedAt) {
+  throw "Velopack did not produce a fresh $ReleaseFeedName feed."
+}
+$ReleaseFeed = Get-Content -LiteralPath $ReleaseFeedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$CurrentFull = @($ReleaseFeed.Assets | Where-Object { $_.PackageId -eq "AmaneStockManager" -and $_.Version -eq $Version -and $_.Type -eq "Full" })
+if ($CurrentFull.Count -ne 1) {
+  throw "The release feed must contain exactly one full AmaneStockManager package for $Version."
+}
+$FullAsset = $CurrentFull[0]
+if ([System.IO.Path]::GetFileName($FullAsset.FileName) -ne $FullAsset.FileName -or $FullAsset.FileName -notmatch '\.nupkg$') {
+  throw "The release feed contains an invalid package filename."
+}
+$FullPath = Join-Path $OutputDir $FullAsset.FileName
+if (!(Test-Path -LiteralPath $FullPath) -or (Get-Item -LiteralPath $FullPath).Length -ne $FullAsset.Size -or
+    (Get-FileHash -LiteralPath $FullPath -Algorithm SHA256).Hash -ne $FullAsset.SHA256) {
+  throw "The release package size or SHA256 does not match the current feed."
+}
+foreach ($FeedName in $CompatibilityFeedNames) {
+  $FeedPath = Join-Path $OutputDir $FeedName
+  Copy-Item -LiteralPath $ReleaseFeedPath -Destination $FeedPath -Force
+  $CompatibilityFeedPaths += $FeedPath
 }
 
 if ($PublishGitHub) {
@@ -151,6 +195,7 @@ if ($PublishGitHub) {
   }
   if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     $GitHubToken = (& gh auth token 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "Unable to obtain GitHub authentication for the release upload." }
   }
   if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw "GitHub token is required for Velopack GitHub upload. Pass -GitHubToken or run gh auth login."
@@ -187,9 +232,10 @@ if ($PublishGitHub) {
     }
 
     Write-Host "Uploading compatibility release feeds to GitHub..."
-    & gh release upload $Tag @CompatibilityFeedPaths --repo $RepoSlug --clobber
-    $UploadFeedsExitCode = $LASTEXITCODE
-    $env:GH_TOKEN = $PreviousGhToken
+    try {
+      & gh release upload $Tag @CompatibilityFeedPaths --repo $RepoSlug --clobber
+      $UploadFeedsExitCode = $LASTEXITCODE
+    } finally { $env:GH_TOKEN = $PreviousGhToken }
     if ($UploadFeedsExitCode -ne 0) {
       throw "Compatibility feed upload failed with exit code $UploadFeedsExitCode"
     }

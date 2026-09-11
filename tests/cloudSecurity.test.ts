@@ -6,6 +6,7 @@ import { ADMIN_ORIGIN, CloudClient } from '../src/main/cloudClient';
 import { JournalStore, TokenVault } from '../src/main/cloudStore';
 import { isTrustedSender } from '../src/main/trustedIpc';
 import { SyncJournal } from '../src/main/cloudSync';
+import { randomUUID } from 'node:crypto';
 
 const dirs: string[] = [];
 async function temporaryFile(name: string) { const dir = await mkdtemp(path.join(tmpdir(), 'amane-cloud-test-')); dirs.push(dir); return path.join(dir, name); }
@@ -74,5 +75,45 @@ describe('main-process authentication and IPC boundaries', () => {
     expect(store.find('b', journal.filePath, 'book-a')).toBeUndefined(); expect(store.find('a', 'C:/synthetic/other.json', 'book-a')).toBeUndefined(); expect(store.find('a', journal.filePath, 'book-b')).toBeUndefined();
     const oldPath = journal.filePath; journal.filePath = 'C:/synthetic/renamed.json'; await store.save(journal, oldPath);
     expect(store.find('a', oldPath, 'book-a')).toBeUndefined(); expect(store.find('a', journal.filePath, 'book-a')?.pending?.body).toBe('exact bytes');
+  });
+
+  it('recognizes only explicit stock API absence, not generic errors or image failures', async () => {
+    for (const scenario of [
+      { status: 410, body: { error: 'STOCK_REQUEST_FAILED' }, type: 'application/json', expected: true },
+      { status: 404, body: { error: 'STOCK_REQUEST_FAILED' }, type: 'application/json; charset=utf-8', expected: true },
+      { status: 404, body: { error: 'Not Found' }, type: 'application/json', expected: false },
+      { status: 410, body: { error: 'STOCK_REQUEST_FAILED' }, type: 'text/html', expected: false },
+      { status: 403, body: { error: 'STOCK_REQUEST_FAILED' }, type: 'application/json', expected: false },
+      { status: 500, body: { error: 'STOCK_REQUEST_FAILED' }, type: 'application/json', expected: false }
+    ]) {
+      const client = new CloudClient(new TokenVault(await temporaryFile('session.encrypted'), encryption), async () =>
+        new Response(JSON.stringify(scenario.body), { status: scenario.status, headers: { 'content-type': scenario.type } }));
+      client.account = account;
+      await expect(client.stock('GET', randomUUID())).rejects.toMatchObject({ status: scenario.status, inventoryMissing: scenario.expected });
+      await expect(client.image(randomUUID())).rejects.toMatchObject({ inventoryMissing: false });
+    }
+    const malformed = new CloudClient(new TokenVault(await temporaryFile('session.encrypted'), encryption), async () =>
+      new Response('{broken', { status: 410, headers: { 'content-type': 'application/json' } }));
+    malformed.account = account;
+    await expect(malformed.stock('GET', randomUUID())).rejects.toMatchObject({ status: 410, inventoryMissing: false });
+  });
+
+  it('recovers a replacement binding from disk before and after the local ID changes, then retires the old binding', async () => {
+    const file = await temporaryFile('journal.json'), store = new JournalStore(file); await store.load();
+    const journal: SyncJournal = { accountId: 'a', filePath: 'C:/synthetic/one.json', inventoryId: 'old', version: 3, baseHash: 'hash', pending: null, conflict: false, lastSuccess: null };
+    await store.save(journal);
+    await store.save({ ...journal, accountId: 'b' });
+    await store.save({ ...journal, replacement: { inventoryId: 'new' } });
+    const restart = new JournalStore(file); await restart.load();
+    expect(restart.find('a', journal.filePath, 'old')?.replacement?.inventoryId).toBe('new');
+    expect(restart.find('a', journal.filePath, 'new')?.inventoryId).toBe('old');
+    expect(restart.find('b', journal.filePath, 'new')).toBeUndefined();
+    expect(restart.find('a', 'C:/synthetic/unapproved-copy.json', 'new')).toBeUndefined();
+    await restart.save({ ...journal, inventoryId: 'new', version: 0, baseHash: '' });
+    expect(restart.find('a', journal.filePath, 'old')).toBeUndefined();
+    expect(restart.find('a', journal.filePath, 'new')?.inventoryId).toBe('new');
+    expect(restart.find('b', journal.filePath, 'old')?.version).toBe(3);
+    const entries = JSON.parse(await readFile(file, 'utf8'));
+    expect(entries).toHaveLength(2);
   });
 });

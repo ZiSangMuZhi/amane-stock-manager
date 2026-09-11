@@ -112,8 +112,16 @@ export class CloudClient {
     if (changed) await this.vault.save(JSON.stringify(Object.fromEntries(this.cookies)));
     if (!response.ok) {
       if (response.status === 401) { this.account = null; }
+      let inventoryMissing = false;
+      if ([404, 410].includes(response.status) && /^\/api\/stock-books(?:\/[0-9a-f-]+)?$/i.test(route) &&
+          /^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
+        // Only the stock API's explicit absence response can recreate a book.
+        // A proxy/router 404, permission failure, or unreadable response must keep the old binding.
+        try { inventoryMissing = JSON.parse((await this.readBytes(response, 16 * 1024)).toString('utf8')).error === 'STOCK_REQUEST_FAILED'; }
+        catch { /* Keep the original HTTP failure without changing local identity. */ }
+      }
       const errors: Record<number, string> = { 401: '登录已失效或用户名密码错误，请重新登录。', 403: '当前账号没有权限，或会话安全校验已失效。', 409: '云端已更新，请选择冲突处理方式。', 428: '请先更新首次登录密码。' };
-      throw new CloudError(errors[response.status] ?? `服务器拒绝请求（HTTP ${response.status}），本地内容已保留。`, response.status, [400, 413].includes(response.status));
+      throw new CloudError(inventoryMissing ? '云端库存已删除或不存在，本地内容已保留。' : errors[response.status] ?? `服务器拒绝请求（HTTP ${response.status}），本地内容已保留。`, response.status, [400, 413].includes(response.status), inventoryMissing);
     }
     return response;
   }

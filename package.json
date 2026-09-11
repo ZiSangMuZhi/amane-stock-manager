@@ -1,6 +1,6 @@
 {
   "name": "amane-stock-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local barcode-based inventory manager with JSON storage, export, and Velopack updates.",
   "author": "Amane Stock Manager",
   "license": "UNLICENSED",
@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "tsc --noEmit && electron-vite build",
-    "package:win": "npm run build && electron-packager . \"Amane Stock Manager\" --platform=win32 --arch=x64 --out=dist-packaged --overwrite --prune=true --ignore=\"^/(src|docs|scripts|\\.config|\\.git|Releases|dist-packaged)(/|$)\"",
+    "package:win": "npm run build && node scripts/package-win.mjs",
     "velopack:pack": "powershell -ExecutionPolicy Bypass -File scripts/package-velopack.ps1",
     "test": "vitest run",
     "lint": "tsc --noEmit"

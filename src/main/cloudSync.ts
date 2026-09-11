@@ -4,7 +4,7 @@ import { InventoryFile, StockRecord } from '../shared/types';
 import { validateStockSnapshot } from './stockPreflight';
 
 export class CloudError extends Error {
-  constructor(message: string, readonly status = 0, readonly definitiveRejection = false) { super(message); }
+  constructor(message: string, readonly status = 0, readonly definitiveRejection = false, readonly inventoryMissing = false) { super(message); }
 }
 
 export function canonicalSnapshot(inventory: InventoryFile): InventoryFile {
@@ -39,6 +39,8 @@ export interface SyncJournal {
   pending: PendingSnapshot | null;
   conflict: boolean;
   lastSuccess: string | null;
+  /** Write-ahead binding change: either ID may be on disk until the replacement is committed. */
+  replacement?: { inventoryId: string };
 }
 
 export interface SyncAdapter {
@@ -52,7 +54,7 @@ export interface SyncAdapter {
 
 export function samePath(a: string, b: string): boolean { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); }
 
-/** One job owns one immutable account/file/book binding. Authentication changes wait for pause(). */
+/** One account/file job; missing book IDs change only through a durable replacement. Account changes wait for pause(). */
 export class SyncEngine {
   private flight: Promise<void> | null = null;
   private paused = false;
@@ -114,13 +116,68 @@ export class SyncEngine {
     await this.adapter.save(this.journal);
   }
 
+  private async replaceMissingInventory(): Promise<void> {
+    if (!this.journal.replacement) {
+      // Commit the next ID before touching the local file. A crash must not allocate another copy.
+      const intent = { ...this.journal, replacement: { inventoryId: randomUUID() } };
+      await this.adapter.save(intent);
+      Object.assign(this.journal, intent);
+    }
+    const nextId = this.journal.replacement!.inventoryId;
+    const local = await this.adapter.read(this.journal.filePath);
+    if (!local || ![this.journal.inventoryId, nextId].includes(local.inventoryId)) {
+      throw new CloudError('连接的本地文件已改变，已停止重新上传。', 400);
+    }
+    this.report('queued', '云端库存已删除或不存在，正在保留本地备份并重新上传…');
+    if (local.inventoryId !== nextId) {
+      await this.adapter.change(this.journal.filePath, this.journal.inventoryId, current => {
+        const { cloudLink: _oldLink, ...inventory } = current;
+        return { ...inventory, inventoryId: nextId };
+      }, true);
+    }
+    const next: SyncJournal = { ...this.journal, inventoryId: nextId, version: 0, baseHash: '', pending: null, conflict: false, lastSuccess: null };
+    delete next.replacement;
+    // JournalStore also removes the old binding identified by its durable replacement intent.
+    await this.adapter.save(next);
+    Object.assign(this.journal, next);
+    delete this.journal.replacement;
+  }
+
   private async work(): Promise<void> {
+    let recreated = Boolean(this.journal.replacement);
+    if (this.journal.replacement) await this.replaceMissingInventory();
     if (this.journal.conflict) { this.report('conflict', '同步冲突待处理，两端副本已保留。'); return; }
+    const request = async (method: 'GET' | 'POST' | 'PUT', body?: string): Promise<StockRecord | null> => {
+      try { return await this.adapter.request(method, this.journal.inventoryId, body); }
+      catch (error) {
+        let missing = error instanceof CloudError && error.inventoryMissing;
+        // A write's old idempotency key can be tombstoned even if somebody has
+        // since recreated that ID. Verify current absence before allocating a new ID.
+        // A fresh POST into a retained soft-deleted ID instead returns 409.
+        if (!recreated && method !== 'GET' && (missing || method === 'POST' && error instanceof CloudError && error.status === 409)) {
+          let current: StockRecord | undefined;
+          try { current = await this.adapter.request('GET', this.journal.inventoryId); }
+          catch (probe) {
+            if (!(probe instanceof CloudError && probe.inventoryMissing)) throw probe;
+            missing = true;
+          }
+          if (current) {
+            this.validateRecord(current);
+            if (missing) throw new CloudError('云端库存已重新建立，请先选择保留方式。', 409);
+          }
+        }
+        if (!missing || recreated || this.paused) throw error;
+        recreated = true;
+        await this.replaceMissingInventory();
+        return null;
+      }
+    };
     for (let pass = 0; pass < 5 && !this.paused; pass++) {
       const local = await this.local();
       if (!this.journal.pending && this.journal.version > 0 && inventoryHash(local) === this.journal.baseHash) {
         this.report('downloading', '正在检查云端版本…');
-        const record = await this.adapter.request('GET', this.journal.inventoryId);
+        const record = await request('GET');
+        if (!record) continue;
         this.validateRecord(record);
         if (record.version < this.journal.version) throw new CloudError('云端版本倒退，已停止同步。', 409);
         if (record.version !== this.journal.version) {
@@ -146,12 +203,14 @@ export class SyncEngine {
           version: this.journal.version, hash: inventoryHash(inventory),
           body: JSON.stringify({ inventory, requestKey, ...(this.journal.version ? { version: this.journal.version } : {}) })
         };
-        // Persist exact wire bytes before any request. Restart/retry replays the same key and version.
-        await this.adapter.save(this.journal);
       }
+      // Every attempt persists exact wire bytes first, including a retry after
+      // the previous journal write failed while its pending value remained in memory.
+      await this.adapter.save(this.journal);
       const pending = this.journal.pending;
       this.report('uploading', '正在发送已保存的库存快照…', Buffer.byteLength(pending.body));
-      const record = await this.adapter.request(pending.method, this.journal.inventoryId, pending.body);
+      const record = await request(pending.method, pending.body);
+      if (!record) continue;
       await this.acknowledge(record, pending.hash);
       if (inventoryHash(await this.local()) === this.journal.baseHash) {
         this.report('synced', '本地与云端已同步。');

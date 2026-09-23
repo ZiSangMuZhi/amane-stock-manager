@@ -2,12 +2,54 @@ import { CloudAccount, StockRecord, StockSummary } from '../shared/types';
 import { CloudError } from './cloudSync';
 import { TokenVault } from './cloudStore';
 import { migrateInventory } from './fileStore';
+import type { ShopProduct } from './shopPriceSync';
 
 // Deployment host is a build-time constant, never a renderer argument or an imported file setting.
-export const ADMIN_ORIGIN = 'https://amane-admin-mtjbdhzwkq-uc.a.run.app';
+export const ADMIN_ORIGIN = 'https://api.amaneacg.space';
+export const ADMIN_SESSION_FILE = 'admin-session-api.amaneacg.space.encrypted';
 const SESSION_COOKIE = '__Host-amane_admin_session';
 const CSRF_COOKIE = '__Host-amane_admin_csrf';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const COOKIE_VALUE = /^[A-Za-z0-9_-]+$/;
+const PRODUCT_FIELDS = ['name', 'imageId', 'currency', 'originalCents', 'currentCents', 'discountBps', 'priceSource'];
+
+function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
+function uuid(value: unknown): value is string { return typeof value === 'string' && UUID.test(value); }
+function integer(value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+function productContent(value: unknown, allowCategory: boolean): boolean {
+  if (!object(value) || Object.keys(value).some(key => !PRODUCT_FIELDS.includes(key) && !(allowCategory && key === 'categoryId')) ||
+      typeof value.name !== 'string' || value.name !== value.name.trim() || !value.name.length || value.name.length > 100 ||
+      !(value.imageId === null || uuid(value.imageId)) || value.currency !== 'CAD' ||
+      !integer(value.originalCents, 0, 100_000_000) || !integer(value.currentCents, 0, 100_000_000) ||
+      !integer(value.discountBps, 0, 10_000) || (value.priceSource !== 'discount' && value.priceSource !== 'current') ||
+      (value.categoryId !== undefined && value.categoryId !== null && !uuid(value.categoryId))) return false;
+  if (!value.originalCents) return value.currentCents === 0 && value.discountBps === 0;
+  if (value.currentCents > value.originalCents) return false;
+  return value.priceSource === 'discount'
+    ? value.currentCents === Math.round(value.originalCents * (10_000 - value.discountBps) / 10_000)
+    : value.discountBps === Math.round((value.originalCents - value.currentCents) * 10_000 / value.originalCents);
+}
+function checkedProduct(value: unknown, expectedId?: string): ShopProduct {
+  if (!object(value) || !uuid(value.id) || (expectedId !== undefined && value.id !== expectedId) || !integer(value.version, 1) ||
+      !(value.sourceBookId === null || uuid(value.sourceBookId)) ||
+      !(value.sourceBarcode === null || (typeof value.sourceBarcode === 'string' && value.sourceBarcode === value.sourceBarcode.trim() &&
+        value.sourceBarcode.length > 0 && value.sourceBarcode.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value.sourceBarcode) &&
+        !['__proto__', 'constructor', 'prototype'].includes(value.sourceBarcode))) ||
+      (value.sourceBookId === null) !== (value.sourceBarcode === null) || typeof value.shopRegistered !== 'boolean' ||
+      !(value.deletedAt === null || (typeof value.deletedAt === 'string' && value.deletedAt.length <= 40 && Number.isFinite(Date.parse(value.deletedAt)))) ||
+      (value.listed !== undefined && typeof value.listed !== 'boolean') || (value.stock !== undefined && !integer(value.stock, 0, 1_000_000_000)) ||
+      !productContent(value.content, true)) throw new CloudError('云端商品响应无效。', 502);
+  return value as unknown as ShopProduct;
+}
+
+function allowedRoute(method: string, route: string): boolean {
+  if (method === 'GET' && ['/api/auth/session', '/api/stock-books', '/api/products'].includes(route)) return true;
+  if (method === 'POST' && ['/api/auth/login', '/api/auth/logout', '/api/auth/change-password', '/api/stock-books', '/api/products/media'].includes(route)) return true;
+  const match = /^\/api\/(stock-books|products|products\/media)\/([^/]+)$/.exec(route);
+  return !!match && uuid(match[2]) && (method === 'GET' || (method === 'PUT' && match[1] !== 'products/media'));
+}
 
 export function checkedId(id: string): string {
   if (typeof id !== 'string' || !UUID.test(id)) throw new CloudError('无效的云端库存或图片标识。', 400);
@@ -20,12 +62,21 @@ export class CloudClient {
   constructor(private readonly vault: TokenVault, private readonly transport: typeof fetch = fetch) {}
   get secureStorage(): boolean { return this.vault.available; }
   async restore(): Promise<void> {
+    this.cookies.clear(); this.account = null;
     const value = await this.vault.load();
     if (value) {
       try {
-        const saved = JSON.parse(value) as Record<string, string>;
-        for (const name of [SESSION_COOKIE, CSRF_COOKIE]) if (typeof saved[name] === 'string' && /^[A-Za-z0-9_-]+$/.test(saved[name])) this.cookies.set(name, saved[name]);
-      } catch { await this.clear(); }
+        const saved: unknown = JSON.parse(value);
+        if (!object(saved) || saved.origin !== ADMIN_ORIGIN || !object(saved.cookies) ||
+            typeof saved.cookies[SESSION_COOKIE] !== 'string' || !COOKIE_VALUE.test(saved.cookies[SESSION_COOKIE])) throw new Error('Session origin mismatch');
+        for (const name of [SESSION_COOKIE, CSRF_COOKIE]) {
+          const cookie = saved.cookies[name];
+          if (cookie !== undefined) {
+            if (typeof cookie !== 'string' || !COOKIE_VALUE.test(cookie)) throw new Error('Invalid saved cookie');
+            this.cookies.set(name, cookie);
+          }
+        }
+      } catch { await this.clear(); return; }
     }
     if (this.cookies.size) await this.session();
   }
@@ -52,11 +103,50 @@ export class CloudClient {
     try { if (this.account) await this.request('POST', '/api/auth/logout', '{}'); }
     finally { await this.clear(); }
   }
-  requireAccount(): CloudAccount {
+  private authenticatedAccount(): CloudAccount {
     if (!this.account) throw new CloudError('请登录管理员账号。', 401);
     if (this.account.mustChangePassword) throw new CloudError('请先修改首次登录密码。', 428);
-    if (!this.account.permissions.includes('content.manage')) throw new CloudError('此账号没有库存管理权限。', 403);
     return this.account;
+  }
+  requireAccount(): CloudAccount {
+    const account = this.authenticatedAccount();
+    if (!account.permissions.includes('content.manage')) throw new CloudError('此账号没有库存管理权限。', 403);
+    return account;
+  }
+  private requireProductAccount(write = false): void {
+    const account = this.authenticatedAccount();
+    if (!account.permissions.includes('products.manage') || (write && !account.permissions.includes('pricing.manage'))) {
+      throw new CloudError(write ? '此账号没有商店商品及价格管理权限。' : '此账号没有商店商品管理权限。', 403);
+    }
+  }
+  async products(): Promise<ShopProduct[]> {
+    this.requireProductAccount();
+    const payload = await this.productRequest('GET', '/api/products');
+    if (!object(payload) || !Array.isArray(payload.items)) throw new CloudError('云端商品列表响应无效。', 502);
+    const items = payload.items.map(value => checkedProduct(value));
+    if (new Set(items.map(item => item.id)).size !== items.length) throw new CloudError('云端商品列表包含重复标识。', 502);
+    return items;
+  }
+  async product(id: string): Promise<ShopProduct> {
+    this.requireProductAccount();
+    return checkedProduct(await this.productRequest('GET', `/api/products/${checkedId(id)}`), id);
+  }
+  async saveProductPrice(id: string, body: string): Promise<ShopProduct> {
+    this.requireProductAccount(true); checkedId(id);
+    if (typeof body !== 'string' || Buffer.byteLength(body) > 16 * 1024) throw new CloudError('商品价格请求无效或超过大小限制。', 400, true);
+    let value: unknown;
+    try { value = JSON.parse(body); } catch { throw new CloudError('商品价格请求无效。', 400, true); }
+    if (!object(value) || Object.keys(value).some(key => !['version', 'requestKey', 'content'].includes(key)) ||
+        !integer(value.version, 1) || !uuid(value.requestKey) || !productContent(value.content, false)) throw new CloudError('商品价格请求无效。', 400, true);
+    // The sync journal owns these exact bytes and the idempotency key. Never rewrite or retry them here.
+    return checkedProduct(await this.productRequest('PUT', `/api/products/${id}`, body), id);
+  }
+  private async productRequest(method: 'GET' | 'PUT', route: string, body?: string): Promise<unknown> {
+    const response = await this.fetchResponse(method, route, body);
+    if (!/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) throw new CloudError('云端商品响应无效。', 502);
+    const bytes = await this.readBytes(response, 20 * 1024 * 1024);
+    try { return JSON.parse(bytes.toString('utf8')) as unknown; }
+    catch { throw new CloudError('云端商品响应无效。', 502); }
   }
   async books(): Promise<StockSummary[]> { this.requireAccount(); return (await this.request<{ items: StockSummary[] }>('GET', '/api/stock-books')).items; }
   async stock(method: 'GET' | 'POST' | 'PUT', id: string, body?: string): Promise<StockRecord> {
@@ -93,23 +183,29 @@ export class CloudClient {
     return Buffer.concat(chunks);
   }
   private async fetchResponse(method: string, route: string, body?: string): Promise<Response> {
-    if (!/^\/api\/(auth\/(login|session|logout|change-password)|stock-books(?:\/[0-9a-f-]+)?|products\/media(?:\/[0-9a-f-]+)?)$/i.test(route)) throw new CloudError('请求路径无效。', 400);
+    if (!allowedRoute(method, route)) throw new CloudError('请求路径无效。', 400);
     const headers: Record<string, string> = { Accept: 'application/json', Origin: ADMIN_ORIGIN };
     if (body) { if (Buffer.byteLength(body) > 16 * 1024 * 1024) throw new CloudError('库存超过 16 MiB 同步限制。', 413, true); headers['Content-Type'] = 'application/json'; }
     if (this.cookies.size) headers.Cookie = [...this.cookies].map(([k,v]) => `${k}=${v}`).join('; ');
     if (this.cookies.has(CSRF_COOKIE)) headers['X-CSRF-Token'] = this.cookies.get(CSRF_COOKIE)!;
     const response = await this.transport(`${ADMIN_ORIGIN}${route}`, { method, headers, body, redirect: 'error', signal: AbortSignal.timeout(30000) });
+    if (response.redirected || (response.status >= 300 && response.status < 400) || (response.url && new URL(response.url).origin !== ADMIN_ORIGIN)) {
+      throw new CloudError('云端响应来源无效，已拒绝跳转。', 502);
+    }
     // Only accept our two host cookies. Tokens never enter renderer or inventory JSON.
     let changed = false;
     for (const cookie of response.headers.getSetCookie()) {
       const match = /^([^=;]+)=([^;]*)/.exec(cookie);
       if (!match || ![SESSION_COOKIE, CSRF_COOKIE].includes(match[1]!)) continue;
+      const attributes = cookie.split(';').slice(1).map(part => part.trim());
+      if (!attributes.some(part => /^secure$/i.test(part)) || !attributes.some(part => /^path=\/$/i.test(part)) ||
+          attributes.some(part => /^domain(?:=|$)/i.test(part)) || attributes.filter(part => /^path=/i.test(part)).length !== 1) continue;
       const [name, value] = [match[1]!, match[2]!];
-      if (value && !/^[A-Za-z0-9_-]+$/.test(value)) continue;
+      if (value && !COOKIE_VALUE.test(value)) continue;
       if (value && !/max-age=0(?:;|$)/i.test(cookie)) this.cookies.set(name, value); else this.cookies.delete(name);
       changed = true;
     }
-    if (changed) await this.vault.save(JSON.stringify(Object.fromEntries(this.cookies)));
+    if (changed) await this.vault.save(JSON.stringify({ origin: ADMIN_ORIGIN, cookies: Object.fromEntries(this.cookies) }));
     if (!response.ok) {
       if (response.status === 401) { this.account = null; }
       let inventoryMissing = false;

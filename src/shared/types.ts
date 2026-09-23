@@ -11,8 +11,12 @@ export interface ShopFields {
 export interface CloudLink { server: string; accountId: string; version: number; baseHash: string }
 export interface CloudAccount { id: string; username: string; displayName: string; mustChangePassword: boolean; permissions: string[] }
 export interface StockSummary { id: string; name: string; version: number; itemCount: number; quantityOnHand: number; updatedAt: string }
-export interface StockRecord { id: string; version: number; inventory: InventoryFile; updatedAt: string }
+export interface StockRecord { id: string; version: number; inventory: InventoryFile; updatedAt: string; shopRegisteredBarcodes?: string[] }
 export interface CloudStatus {
+  inventoryId?: string;
+  registeredBarcodes?: string[];
+  shopPriceConflict?: boolean;
+  shopPricePendingCount?: number;
   state: 'local-only' | 'queued' | 'uploading' | 'downloading' | 'synced' | 'offline' | 'error' | 'expired' | 'conflict';
   message: string;
   account: CloudAccount | null;
@@ -128,6 +132,7 @@ export interface RendererApi {
   cloudDownload(id: string): Promise<InventoryDocument>;
   cloudRetry(): Promise<CloudStatus>;
   cloudResolve(choice: 'use-cloud' | 'upload-new'): Promise<InventoryDocument>;
+  cloudResolveShopPrices(choice: 'retry-local' | 'keep-shop'): Promise<InventoryDocument>;
   onCloudStatus(callback: (status: CloudStatus) => void): () => void;
   updateListing(barcode: string, listed: boolean): Promise<InventoryDocument>;
   updateShop(barcode: string, shop: ShopFields): Promise<InventoryDocument>;

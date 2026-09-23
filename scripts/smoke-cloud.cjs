@@ -21,7 +21,7 @@ function json(value, status=200, headers={}) { return new Response(JSON.stringif
 global.fetch = async (target, options={}) => {
   const url = new URL(String(target));
   requests.push({path:url.pathname,method:options.method||'GET'});
-  if (url.origin !== 'https://amane-admin-mtjbdhzwkq-uc.a.run.app') return json({error:'SYNTHETIC_NETWORK_DISABLED'},404);
+  if (url.origin !== 'https://api.amaneacg.space') return json({error:'SYNTHETIC_NETWORK_DISABLED'},404);
   const route = url.pathname;
   if (route === '/api/auth/login') {
     const headers = new Headers();

@@ -3,6 +3,7 @@ out/
 dist/
 dist-packaged/
 artifacts/
+test-results/
 Releases/
 *.log
 .DS_Store

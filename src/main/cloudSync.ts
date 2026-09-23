@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { InventoryFile, StockRecord } from '../shared/types';
 import { validateStockSnapshot } from './stockPreflight';
+import { checkpointShopPrices, flushShopPrices, prepareShopPrices, readShopPriceResolution, sameShopPrice,
+  ShopPriceSyncError, type ShopPriceIntent, type ShopPriceCandidate, type ShopPriceTransport } from './shopPriceSync';
 
 export class CloudError extends Error {
   constructor(message: string, readonly status = 0, readonly definitiveRejection = false, readonly inventoryMissing = false) { super(message); }
@@ -28,6 +30,8 @@ export interface PendingSnapshot {
   version: number;
   hash: string;
   body: string;
+  shopPrices?: ShopPriceIntent[];
+  shopPriceCandidates?: ShopPriceCandidate[];
 }
 
 export interface SyncJournal {
@@ -39,6 +43,9 @@ export interface SyncJournal {
   pending: PendingSnapshot | null;
   conflict: boolean;
   lastSuccess: string | null;
+  registeredBarcodes?: string[];
+  shopPricePending?: ShopPriceIntent[];
+  shopPriceConflict?: boolean;
   /** Write-ahead binding change: either ID may be on disk until the replacement is committed. */
   replacement?: { inventoryId: string };
 }
@@ -50,6 +57,7 @@ export interface SyncAdapter {
   request(method: 'GET' | 'POST' | 'PUT', inventoryId: string, body?: string): Promise<StockRecord>;
   report(state: 'queued' | 'uploading' | 'downloading' | 'synced' | 'offline' | 'error' | 'expired' | 'conflict', message: string, journal: SyncJournal, bytes?: number): void;
   server: string;
+  shopPrices?: ShopPriceTransport;
 }
 
 export function samePath(a: string, b: string): boolean { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); }
@@ -66,9 +74,20 @@ export class SyncEngine {
     if (this.flight) return this.flight;
     if (this.paused) return Promise.resolve();
     this.flight = this.work().catch(error => {
+      if (error instanceof ShopPriceSyncError) {
+        const next = { ...this.journal, shopPriceConflict: error.conflict || Boolean(this.journal.shopPriceConflict) };
+        return checkpointShopPrices(this.journal, next, value => this.adapter.save(value))
+          .then(() => this.report(error.status === 401 ? 'expired' : 'error', error.message))
+          .catch(() => {
+            // A failing journal must not become an unhandled background rejection or clear the old request.
+            if (error.conflict) this.journal.shopPriceConflict = true;
+            this.report('error', `${error.message} 同步状态保存失败，请检查本地磁盘后重试。`);
+          });
+      }
       if (error instanceof CloudError && error.status === 409) {
         this.journal.conflict = true;
-        return this.adapter.save(this.journal).then(() => this.report('conflict', '两端版本不同。请先选择保留方式。'));
+        return this.adapter.save(this.journal).then(() => this.report('conflict', '两端版本不同。请先选择保留方式。'))
+          .catch(() => this.report('error', '两端版本不同，冲突状态保存失败，请检查本地磁盘。'));
       }
       if (error instanceof CloudError && error.definitiveRejection && [400, 413].includes(error.status)) {
         // Definitive validation rejection cannot have committed a stock mutation. Corrected local input may use a fresh key.
@@ -98,7 +117,7 @@ export class SyncEngine {
     }
   }
 
-  private async acknowledge(record: StockRecord, expectedHash: string, backup = false): Promise<void> {
+  private async acknowledge(record: StockRecord, expectedHash: string, backup = false, shopPrices: ShopPriceIntent[] = [], candidates: ShopPriceCandidate[] = []): Promise<void> {
     this.validateRecord(record);
     const baseHash = inventoryHash(record.inventory);
     const link = { server: this.adapter.server, accountId: this.journal.accountId, version: record.version, baseHash };
@@ -108,12 +127,14 @@ export class SyncEngine {
       if (backup && !safeToReplace) throw new CloudError('准备替换时本地已变化，保留两端版本并等待重新选择。', 409);
       return { ...(safeToReplace ? canonicalSnapshot(record.inventory) : current), cloudLink: link };
     }, backup);
-    this.journal.version = record.version;
-    this.journal.baseHash = baseHash;
-    this.journal.pending = null;
-    this.journal.conflict = false;
-    this.journal.lastSuccess = new Date().toISOString();
-    await this.adapter.save(this.journal);
+    const registered = new Set(record.shopRegisteredBarcodes ?? []);
+    const prepared = [...shopPrices, ...candidates.filter(candidate => registered.has(candidate.barcode)).map(candidate => ({ ...candidate, productId: '' }))];
+    // Stock acknowledgement and handoff to the product queue are one durable commit.
+    await checkpointShopPrices(this.journal, { ...this.journal, version: record.version, baseHash,
+      pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes,
+      shopPricePending: [...(this.journal.shopPricePending ?? []), ...prepared],
+      lastSuccess: prepared.length ? this.journal.lastSuccess : new Date().toISOString()
+    }, value => this.adapter.save(value));
   }
 
   private async replaceMissingInventory(): Promise<void> {
@@ -135,7 +156,8 @@ export class SyncEngine {
         return { ...inventory, inventoryId: nextId };
       }, true);
     }
-    const next: SyncJournal = { ...this.journal, inventoryId: nextId, version: 0, baseHash: '', pending: null, conflict: false, lastSuccess: null };
+    const next: SyncJournal = { ...this.journal, inventoryId: nextId, version: 0, baseHash: '', pending: null,
+      conflict: false, lastSuccess: null, shopPricePending: [], shopPriceConflict: false, registeredBarcodes: undefined };
     delete next.replacement;
     // JournalStore also removes the old binding identified by its durable replacement intent.
     await this.adapter.save(next);
@@ -172,6 +194,19 @@ export class SyncEngine {
         return null;
       }
     };
+    const flushPrices = async (): Promise<void> => {
+      if (!this.journal.shopPricePending?.length || this.paused) return;
+      await this.local();
+      // A deleted book must be recreated without carrying the old product identities into it.
+      const record = await request('GET');
+      if (!record) return;
+      this.validateRecord(record);
+      if (this.journal.shopPriceConflict) throw new ShopPriceSyncError('库存已同步，商店价格冲突待处理。请选择保留商店价格或重新应用本地价格。', 409, true);
+      if (!this.adapter.shopPrices) throw new ShopPriceSyncError('库存已同步，商店价格同步尚不可用，待发价格已保留。');
+      this.report('uploading', '库存已同步，正在同步已注册商品的价格…');
+      await flushShopPrices(this.journal, this.adapter.shopPrices, value => this.adapter.save(value), () => this.paused);
+    };
+    await flushPrices();
     for (let pass = 0; pass < 5 && !this.paused; pass++) {
       const local = await this.local();
       if (!this.journal.pending && this.journal.version > 0 && inventoryHash(local) === this.journal.baseHash) {
@@ -187,6 +222,7 @@ export class SyncEngine {
         }
         if (inventoryHash(await this.local()) === this.journal.baseHash) {
           this.journal.lastSuccess = new Date().toISOString();
+          this.journal.registeredBarcodes = record.shopRegisteredBarcodes;
           await this.adapter.save(this.journal);
           this.report('synced', '本地与云端已同步。');
           return;
@@ -197,11 +233,27 @@ export class SyncEngine {
         const latest = await this.local();
         const inventory = canonicalSnapshot(latest);
         validateStockSnapshot(inventory);
+        let shopPrices: ShopPriceIntent[] = [];
+        let shopPriceCandidates: ShopPriceCandidate[] = [];
+        if (this.journal.version > 0 && this.adapter.shopPrices) {
+          try {
+            const prepared = await prepareShopPrices(inventory, this.journal.version, this.adapter.shopPrices);
+            shopPrices = prepared.intents; shopPriceCandidates = prepared.candidates;
+          }
+          catch (error) {
+            if (error instanceof CloudError && error.inventoryMissing) {
+              const existing = await request('GET');
+              if (!existing) continue;
+            }
+            throw error;
+          }
+        }
+        if (this.paused) return;
         const requestKey = randomUUID();
         this.journal.pending = {
           method: this.journal.version === 0 ? 'POST' : 'PUT', requestKey,
           version: this.journal.version, hash: inventoryHash(inventory),
-          body: JSON.stringify({ inventory, requestKey, ...(this.journal.version ? { version: this.journal.version } : {}) })
+          body: JSON.stringify({ inventory, requestKey, ...(this.journal.version ? { version: this.journal.version } : {}) }), shopPrices, shopPriceCandidates
         };
       }
       // Every attempt persists exact wire bytes first, including a retry after
@@ -211,8 +263,13 @@ export class SyncEngine {
       this.report('uploading', '正在发送已保存的库存快照…', Buffer.byteLength(pending.body));
       const record = await request(pending.method, pending.body);
       if (!record) continue;
-      await this.acknowledge(record, pending.hash);
+      await this.acknowledge(record, pending.hash, false, pending.shopPrices, pending.shopPriceCandidates);
+      await flushPrices();
+      if (this.paused || this.journal.shopPricePending?.length) return;
+      // A disappearance discovered while flushing created a replacement that still needs its POST.
+      if (this.journal.version === 0) continue;
       if (inventoryHash(await this.local()) === this.journal.baseHash) {
+        await checkpointShopPrices(this.journal, { ...this.journal, lastSuccess: new Date().toISOString() }, value => this.adapter.save(value));
         this.report('synced', '本地与云端已同步。');
         return;
       }
@@ -221,7 +278,12 @@ export class SyncEngine {
   }
 
   async useCloud(): Promise<void> {
+    if (this.journal.shopPricePending?.length) throw new ShopPriceSyncError('请先处理待同步的商店价格，再选择库存副本。', 409, true);
     await this.pause();
+    if (this.journal.shopPricePending?.length) {
+      this.resume();
+      throw new ShopPriceSyncError('请先处理待同步的商店价格，再选择库存副本。', 409, true);
+    }
     this.report('downloading', '正在获取云端副本并备份本地文件…');
     const expected = inventoryHash(await this.local());
     const record = await this.adapter.request('GET', this.journal.inventoryId);
@@ -231,5 +293,41 @@ export class SyncEngine {
     await this.acknowledge(record, expected, true);
     this.resume();
     this.report('synced', '已保存本地备份并使用云端副本。');
+  }
+
+  async resolveShopPrices(choice: 'retry-local' | 'keep-shop'): Promise<void> {
+    if (!['retry-local', 'keep-shop'].includes(choice)) throw new Error('无效的价格处理方式。');
+    await this.pause();
+    try {
+      const pending = this.journal.shopPricePending ?? [];
+      if (!pending.length) return;
+      if (!this.adapter.shopPrices) throw new ShopPriceSyncError('商店价格同步尚不可用，待发价格已保留。');
+      // Lock automatic dispatch before a resolution touches the file. A crash/save failure after
+      // keep-shop updates the file must not later replay the older desired price without consent.
+      await checkpointShopPrices(this.journal, { ...this.journal, shopPriceConflict: true }, value => this.adapter.save(value));
+      const resolved = await readShopPriceResolution(pending, this.adapter.shopPrices);
+      if (choice === 'keep-shop') {
+        await this.adapter.change(this.journal.filePath, this.journal.inventoryId, current => {
+          const inventory = structuredClone(current);
+          for (const { intent, price } of resolved) {
+            const item = inventory.items[intent.barcode];
+            // New edits made after the failed upload or during this GET remain queued.
+            if (item && sameShopPrice(item.shop, intent.desired)) {
+              item.shop = { ...item.shop, ...price };
+              if (item.priceCurrency === 'CAD') item.salePriceAmount = price.currentCents / 100;
+              item.updatedAt = inventory.updatedAt = new Date().toISOString();
+            }
+          }
+          return inventory;
+        });
+      }
+      await checkpointShopPrices(this.journal, { ...this.journal, shopPriceConflict: false,
+        shopPricePending: choice === 'keep-shop' ? [] : resolved.map(({ intent, price }) => {
+          const { request: _oldRequest, ...rest } = intent;
+          return { ...rest, base: price };
+        })
+      }, value => this.adapter.save(value));
+    } finally { this.resume(); }
+    await this.run();
   }
 }

@@ -11,6 +11,7 @@ const api: RendererApi = {
   cloudDownload: id => ipcRenderer.invoke('cloud:download', id),
   cloudRetry: () => ipcRenderer.invoke('cloud:retry'),
   cloudResolve: choice => ipcRenderer.invoke('cloud:resolve', choice),
+  cloudResolveShopPrices: choice => ipcRenderer.invoke('cloud:resolve-shop-prices', choice),
   updateListing: (barcode, listed) => ipcRenderer.invoke('inventory:listing', barcode, listed),
   updateShop: (barcode, shop) => ipcRenderer.invoke('inventory:shop', barcode, shop),
   chooseShopImage: () => ipcRenderer.invoke('cloud:choose-image'),

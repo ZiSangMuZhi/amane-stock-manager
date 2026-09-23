@@ -31,7 +31,7 @@ import {
 } from './fileStore';
 import { defaultExportName, exportInventoryFile } from './exporters';
 import { lookupBarcode } from './productLookup';
-import { CloudClient, ADMIN_ORIGIN } from './cloudClient';
+import { CloudClient, ADMIN_ORIGIN, ADMIN_SESSION_FILE } from './cloudClient';
 import { CloudController } from './cloudController';
 import { JournalStore, TokenVault } from './cloudStore';
 import { isTrustedSender } from './trustedIpc';
@@ -473,6 +473,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('cloud:download', (_event, id: string) => cloud.control(() => cloud.download(id)));
   ipcMain.handle('cloud:retry', () => cloud.control(() => cloud.retry()));
   ipcMain.handle('cloud:resolve', (_event, choice: 'use-cloud' | 'upload-new') => cloud.control(() => cloud.resolve(choice)));
+  ipcMain.handle('cloud:resolve-shop-prices', (_event, choice: 'retry-local' | 'keep-shop') => cloud.control(() => cloud.resolveShopPrices(choice)));
   ipcMain.handle('inventory:listing', (_event, barcode: string, listed: boolean) => queueInventoryWrite(async () => {
     currentInventory = updateListing(requireInventory(), barcode, listed); await saveCurrentInventory(); return currentDocument();
   }));
@@ -513,7 +514,7 @@ async function backupIfExists(filePath: string): Promise<void> {
 
 function createCloudController(): CloudController {
   const directory = app.getPath('userData');
-  const vault = new TokenVault(path.join(directory, 'admin-session.encrypted'), {
+  const vault = new TokenVault(path.join(directory, ADMIN_SESSION_FILE), {
     isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
     getSelectedStorageBackend: () => process.platform === 'linux' ? safeStorage.getSelectedStorageBackend() : 'os',
     encryptString: value => safeStorage.encryptString(value), decryptString: value => safeStorage.decryptString(value)

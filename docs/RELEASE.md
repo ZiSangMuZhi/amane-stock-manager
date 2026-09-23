@@ -4,15 +4,15 @@
 
 ```powershell
 npm install
-npm run velopack:pack -- -Version 0.2.1
+npm run velopack:pack -- -Version 0.2.2
 ```
 
 This creates Velopack output in `Releases/`, including `Setup.exe`, full update packages, release indexes, and portable output when supported by Velopack.
 
-For local rebuilds of the same version, clean generated release output first:
+Keep historical release files for rollback. For a disposable output directory only, an optional clean rebuild is:
 
 ```powershell
-npm run velopack:pack -- -Version 0.2.1 -CleanOutput
+npm run velopack:pack -- -Version 0.2.2 -CleanOutput
 ```
 
 ## Updates
@@ -20,10 +20,10 @@ npm run velopack:pack -- -Version 0.2.1 -CleanOutput
 Build with an HTTPS update feed:
 
 ```powershell
-npm run velopack:pack -- -Version 0.2.1 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager" -PublishGitHub
+npm run velopack:pack -- -Version 0.2.2 -GithubRepoUrl "https://github.com/ZiSangMuZhi/amane-stock-manager"
 ```
 
-When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. The app caches the GitHub release feed and full update package locally before handing the update to Velopack, avoiding direct Velopack directory probes against GitHub. `-PublishGitHub` uploads the generated Velopack assets to a published GitHub Release.
+When `-GithubRepoUrl` is provided without `-UpdateUrl`, the build embeds the GitHub Release `latest/download/` URL as the app update feed. The app caches the GitHub release feed and full update package locally before handing the update to Velopack, avoiding direct Velopack directory probes against GitHub. For a production release, run `node scripts/verify-release-candidate.cjs 0.2.2 0.2.1`, then stage only the current version binaries and current-version feeds in a separate directory. Verify a draft GitHub release before making it public. Preserve older releases and do not upload the entire historical `Releases` directory.
 
 ## Uninstall
 
@@ -55,11 +55,11 @@ msiexec /i AmaneStockManager.msi VELOPACK_INSTALLDIR="D:\Apps\Amane Stock Manage
 To also generate an MSI:
 
 ```powershell
-npm run velopack:pack -- -Version 0.2.1 -Msi
+npm run velopack:pack -- -Version 0.2.2 -Msi
 ```
 
 The MSI default scope is `PerUser`. To change it at package time:
 
 ```powershell
-npm run velopack:pack -- -Version 0.2.1 -Msi -InstallScope PerMachine
+npm run velopack:pack -- -Version 0.2.2 -Msi -InstallScope PerMachine
 ```

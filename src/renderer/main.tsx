@@ -38,7 +38,9 @@ import {
 import './styles.css';
 import { CloudPanel } from './CloudPanel';
 import { ShopEditor } from './ShopEditor';
+import { cardPriceDirty, cardPriceIdentity, keepCardPrice, parseCardPrices, priceDocumentIdentity, receiveCardPrice, receiveCardPrices, startCardPrice, type CardPriceEditor, type PriceDraft } from './cardPriceDraft';
 import {
+  CloudStatus,
   CurrencyCode,
   ExportFormat,
   InventoryDocument,
@@ -52,7 +54,6 @@ type Notice = { type: 'info' | 'success' | 'warning' | 'error'; text: string };
 type ViewMode = 'standard' | 'compact';
 type InventoryScope = 'all' | 'outbound' | 'notOutbound';
 type ThemeMode = 'light' | 'dark';
-type PriceDraft = { purchaseAmount: string; saleAmount: string; currency: CurrencyCode };
 type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' | 'totalOut' | 'recent';
 type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
 type ActionOptions = { focusBarcode?: boolean; preserveScroll?: boolean; anchorBarcode?: string };
@@ -79,7 +80,9 @@ function App(): JSX.Element {
   const [exportOpen, setExportOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
-  const [priceDrafts, setPriceDrafts] = useState<Record<string, PriceDraft>>({});
+  const [storedPrices, setPriceEditors] = useState<Record<string, CardPriceEditor>>({});
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const priceWriteLock = useRef(false), documentRef = useRef(document); documentRef.current = document;
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
   const [inventoryScope, setInventoryScope] = useState<InventoryScope>('all');
@@ -93,6 +96,20 @@ function App(): JSX.Element {
 
   const inventory = document.inventory;
   const orderedItems = useMemo(() => sortItems(Object.values(inventory?.items ?? {})), [inventory]);
+  const priceScope = priceDocumentIdentity(document);
+  const priceEditors = receiveCardPrices(storedPrices, priceScope, orderedItems);
+  if (priceEditors !== storedPrices) setPriceEditors(priceEditors);
+  const priceEditorsRef = useRef(priceEditors); priceEditorsRef.current = priceEditors;
+  const priceDrafts = Object.fromEntries(Object.entries(priceEditors).map(([key, value]) => [key, value.draft]));
+  const registeredBarcodes = cloudStatus?.inventoryId === inventory?.inventoryId ? cloudStatus?.registeredBarcodes ?? [] : [];
+  useEffect(() => {
+    let active = true, version = 0; setCloudStatus(null);
+    const accept = (status: CloudStatus) => { if (active && status.inventoryId === inventory?.inventoryId) setCloudStatus(status); };
+    const stop = window.amaneStock.onCloudStatus(status => { version++; accept(status); });
+    const requestVersion = version;
+    void window.amaneStock.cloudStatus().then(status => { if (version === requestVersion) accept(status); }).catch(() => undefined);
+    return () => { active = false; stop(); };
+  }, [document.filePath, inventory?.inventoryId]);
   const scopedItems = useMemo(() => filterByInventoryScope(orderedItems, inventoryScope), [orderedItems, inventoryScope]);
   const visibleItems = useMemo(() => filterItems(scopedItems, searchQuery), [scopedItems, searchQuery]);
   const totals = useMemo(() => {
@@ -167,18 +184,6 @@ function App(): JSX.Element {
   useEffect(() => {
     const nextDrafts = Object.fromEntries(orderedItems.map((item) => [item.barcode, item.nickname]));
     setNicknameDrafts(nextDrafts);
-    setPriceDrafts(
-      Object.fromEntries(
-        orderedItems.map((item) => [
-          item.barcode,
-          {
-            purchaseAmount: item.priceAmount === null ? '' : String(item.priceAmount),
-            saleAmount: item.salePriceAmount === null ? '' : String(item.salePriceAmount),
-            currency: item.priceCurrency
-          }
-        ])
-      )
-    );
     setQuantityDrafts(Object.fromEntries(orderedItems.map((item) => [item.barcode, String(item.quantityOnHand)])));
   }, [orderedItems]);
 
@@ -225,11 +230,18 @@ function App(): JSX.Element {
     setNotice({ type: 'error', text: error instanceof Error ? error.message : String(error) });
   }
 
+  function setPriceEditor(barcode: string, next: CardPriceEditor): void {
+    priceEditorsRef.current = { ...priceEditorsRef.current, [barcode]: next };
+    setPriceEditors(current => ({ ...current, [barcode]: next }));
+  }
+  function currentPriceEditor(item: InventoryItem): { item: InventoryItem; editor: CardPriceEditor; scope: string } | null {
+    const doc = documentRef.current, current = doc.inventory?.items[item.barcode], scope = priceDocumentIdentity(doc);
+    if (!current || scope !== priceScope || current.createdAt !== item.createdAt) return null;
+    return { item: current, editor: receiveCardPrice(priceEditorsRef.current[item.barcode], scope, current), scope };
+  }
   function updatePriceDraft(item: InventoryItem, patch: Partial<PriceDraft>): void {
-    setPriceDrafts((drafts) => ({
-      ...drafts,
-      [item.barcode]: { ...priceDraftFromItem(item), ...drafts[item.barcode], ...patch }
-    }));
+    const current = currentPriceEditor(item); if (!current) return;
+    setPriceEditor(item.barcode, { ...current.editor, draft: { ...current.editor.draft, ...patch } });
   }
 
   async function handleCreate(): Promise<void> {
@@ -299,39 +311,35 @@ function App(): JSX.Element {
     });
   }
 
-  async function handlePriceBlur(item: InventoryItem): Promise<void> {
-    const draft = priceDrafts[item.barcode] ?? priceDraftFromItem(item);
-    const purchasePrice = parsePrice(draft.purchaseAmount);
-    const salePrice = parsePrice(draft.saleAmount);
-    if (purchasePrice === item.priceAmount && salePrice === item.salePriceAmount && draft.currency === item.priceCurrency) {
-      return;
+  async function saveCardPrices(item: InventoryItem, explicit = false): Promise<void> {
+    const current = currentPriceEditor(item); if (!current || priceWriteLock.current || busy) return;
+    const { editor, scope } = current;
+    if (editor.conflict) { setPriceEditor(item.barcode, editor); setNotice({ type: 'warning', text: '价格已在别处变化，当前草稿仍保留。请先选择重新载入或保留草稿。' }); return; }
+    if (editor.manual && !explicit) return;
+    let purchasePrice: number | null, salePrice: number | null;
+    try { ({ purchasePrice, salePrice } = parseCardPrices(editor.draft, current.item)); }
+    catch (error) { showError(error); return; }
+    if (purchasePrice === current.item.priceAmount && salePrice === current.item.salePriceAmount && editor.draft.currency === current.item.priceCurrency) {
+      setPriceEditor(item.barcode, startCardPrice(scope, current.item)); return;
     }
-
-    await runCardAction(item.barcode, () => window.amaneStock.updatePrice(item.barcode, purchasePrice, salePrice, draft.currency), (next) => {
-      setDocument(next);
-      setNotice({ type: 'success', text: '价格已保存。' });
-    });
-  }
-
-  async function handleCurrencyChange(item: InventoryItem, currency: CurrencyCode): Promise<void> {
-    const draft = priceDrafts[item.barcode] ?? priceDraftFromItem(item);
-    const nextDraft = { ...draft, currency };
-    setPriceDrafts((drafts) => ({ ...drafts, [item.barcode]: nextDraft }));
-
-    await runCardAction(
-      item.barcode,
-      () =>
-        window.amaneStock.updatePrice(
-          item.barcode,
-          parsePrice(nextDraft.purchaseAmount),
-          parsePrice(nextDraft.saleAmount),
-          currency
-        ),
-      (next) => {
+    priceWriteLock.current = true;
+    try {
+      await runCardAction(item.barcode, () => window.amaneStock.updatePrice(item.barcode, purchasePrice, salePrice, editor.draft.currency), next => {
+        if (priceDocumentIdentity(documentRef.current) !== scope) return;
+        const saved = next.inventory?.items[item.barcode];
+        if (priceDocumentIdentity(next) !== scope || !saved || cardPriceIdentity(scope, saved) !== editor.identity) { setNotice({ type: 'warning', text: '文件或商品已变化，请核对本地记录；未替换当前草稿。' }); return; }
+        const pending = priceEditorsRef.current[item.barcode];
+        setPriceEditor(item.barcode, pending && JSON.stringify(pending.draft) !== JSON.stringify(editor.draft) ? keepCardPrice(pending, saved) : startCardPrice(scope, saved));
         setDocument(next);
-        setNotice({ type: 'success', text: '货币单位已保存。' });
-      }
-    );
+        const currencyNotice = editor.draft.currency !== current.item.priceCurrency ? '货币标签已更新，未执行换汇。' : '';
+        setNotice({ type: 'success', text: current.item.priceCurrency === 'CAD' && editor.draft.currency === 'CAD' && salePrice !== null && salePrice !== current.item.salePriceAmount ? `已保存到本地；已连接库存将自动同步商店。${currencyNotice}` : `价格已保存到本地。${salePrice === null ? '售价未定价，不会将商店商品改为免费。' : ''}${currencyNotice}` });
+      });
+    } finally { priceWriteLock.current = false; }
+  }
+  async function handlePriceBlur(item: InventoryItem): Promise<void> { await saveCardPrices(item); }
+  async function handleCurrencyChange(item: InventoryItem, currency: CurrencyCode): Promise<void> {
+    updatePriceDraft(item, { currency });
+    await saveCardPrices(item);
   }
 
   async function handleQuantityBlur(item: InventoryItem): Promise<void> {
@@ -368,7 +376,7 @@ function App(): JSX.Element {
     await runCardAction(item.barcode, () => window.amaneStock.deleteItem(item.barcode), (next) => {
       setDocument(next);
       setNicknameDrafts((drafts) => omitKey(drafts, item.barcode));
-      setPriceDrafts((drafts) => omitKey(drafts, item.barcode));
+      setPriceEditors((drafts) => omitKey(drafts, item.barcode));
       setQuantityDrafts((drafts) => omitKey(drafts, item.barcode));
       setNotice({ type: 'success', text: '品类已删除。' });
     });
@@ -825,7 +833,7 @@ function App(): JSX.Element {
                         <Trash2 size={14} />
                       </button>
                     </div>
-                    <ShopEditor item={item} onDocument={setDocument} />
+                    <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} onDocument={setDocument} />
                   </article>
                 ) : (
                 <article
@@ -857,7 +865,7 @@ function App(): JSX.Element {
                     <code>{item.barcode}</code>
                   </div>
 
-                  <ShopEditor item={item} onDocument={setDocument} />
+                  <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} onDocument={setDocument} />
 
                   <div className="item-edit-row">
                     <label className="nickname-field">
@@ -914,10 +922,11 @@ function App(): JSX.Element {
                         <span>进价</span>
                         <input
                           value={priceDrafts[item.barcode]?.purchaseAmount ?? ''}
+                          disabled={busy}
                           inputMode="decimal"
                           placeholder="0.00"
                           onChange={(event) => updatePriceDraft(item, { purchaseAmount: event.target.value })}
-                          onBlur={() => handlePriceBlur(item)}
+                          onBlur={event => { if (!event.relatedTarget || !event.currentTarget.closest('.price-row')?.contains(event.relatedTarget as Node)) void handlePriceBlur(item); }}
                           onKeyDown={(event) => {
                             if (event.key === 'Enter') {
                               event.currentTarget.blur();
@@ -930,10 +939,11 @@ function App(): JSX.Element {
                       <span>售价</span>
                       <input
                         value={priceDrafts[item.barcode]?.saleAmount ?? ''}
+                        disabled={busy}
                         inputMode="decimal"
                         placeholder="0.00"
                         onChange={(event) => updatePriceDraft(item, { saleAmount: event.target.value })}
-                        onBlur={() => handlePriceBlur(item)}
+                        onBlur={event => { if (!event.relatedTarget || !event.currentTarget.closest('.price-row')?.contains(event.relatedTarget as Node)) void handlePriceBlur(item); }}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter') {
                             event.currentTarget.blur();
@@ -945,6 +955,8 @@ function App(): JSX.Element {
                       <span>货币</span>
                       <select
                         value={priceDrafts[item.barcode]?.currency ?? item.priceCurrency}
+                        disabled={busy}
+                        title="只修改货币标签，不执行换汇"
                         onChange={(event) => handleCurrencyChange(item, event.target.value as CurrencyCode)}
                       >
                         {currencyOptions.map((currency) => (
@@ -967,6 +979,10 @@ function App(): JSX.Element {
                       <strong>{hidePurchasePrice ? '已隐藏' : formatGrossProfitScopeValue(item, inventoryScope)}</strong>
                     </div>
                   </div>
+
+                  {priceEditors[item.barcode] && cardPriceDirty(priceEditors[item.barcode]!) && <div className="card-price-draft" role={priceEditors[item.barcode]!.conflict ? 'alert' : 'status'}>
+                    {priceEditors[item.barcode]!.conflict ? <><strong>价格记录已变化，未保存的输入仍保留。</strong><p>当前记录：进价 {formatPurchasePrice(item)}，售价 {formatSalePrice(item)}。请先选择如何处理，失去焦点不会覆盖新价格。</p><button type="button" disabled={busy} onClick={() => { const current = currentPriceEditor(item); if (current) setPriceEditor(item.barcode, startCardPrice(current.scope, current.item)); }}>重新载入价格</button><button type="button" disabled={busy} onClick={() => { const current = currentPriceEditor(item); if (current) setPriceEditor(item.barcode, keepCardPrice(current.editor, current.item)); }}>保留草稿继续编辑</button></> : <><span>{priceEditors[item.barcode]!.manual ? '草稿已保留。确认保存后将替换本地记录中的价格。' : '价格有未保存修改。'}</span><button type="button" disabled={busy} onClick={() => void saveCardPrices(item, true)}>保存价格</button><button type="button" disabled={busy} onClick={() => { const current = currentPriceEditor(item); if (current) setPriceEditor(item.barcode, startCardPrice(current.scope, current.item)); }}>放弃修改</button></>}
+                  </div>}
 
                   <div className="status-row">
                     <StatusPill status={item.lookupStatus} />
@@ -1323,18 +1339,6 @@ function formatTime(value: string | null): string {
   }
 }
 
-function parsePrice(value: string): number | null {
-  const normalized = value.replace(/,/g, '').trim();
-  if (!normalized) {
-    return null;
-  }
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return null;
-  }
-  return Math.round(parsed * 100) / 100;
-}
-
 function parseQuantity(value: string): number | null {
   const normalized = value.trim();
   if (!/^\d+$/.test(normalized)) {
@@ -1342,14 +1346,6 @@ function parseQuantity(value: string): number | null {
   }
   const parsed = Number(normalized);
   return Number.isSafeInteger(parsed) ? parsed : null;
-}
-
-function priceDraftFromItem(item: InventoryItem): PriceDraft {
-  return {
-    purchaseAmount: item.priceAmount === null ? '' : String(item.priceAmount),
-    saleAmount: item.salePriceAmount === null ? '' : String(item.salePriceAmount),
-    currency: item.priceCurrency
-  };
 }
 
 function formatPurchasePrice(item: InventoryItem): string {

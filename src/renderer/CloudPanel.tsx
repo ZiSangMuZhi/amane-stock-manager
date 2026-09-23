@@ -41,9 +41,15 @@ export function CloudPanel({ document, onDocument }: { document: InventoryDocume
       <button type="button" disabled={busy} onClick={() => void action(async () => onDocument(await window.amaneStock.cloudResolve('use-cloud')))}>备份本地并使用云端</button>
       <button type="button" disabled={busy} onClick={() => void action(async () => onDocument(await window.amaneStock.cloudResolve('upload-new')))}>备份并上传为新库存</button>
     </div>}
+    {status?.shopPriceConflict && <div className="cloud-conflict" role="alert">
+      <p>商店商品在同步期间有其他修改。库存已保存，待发价格仍保留；请选择本次价格以哪一端为准。</p>
+      <button type="button" disabled={busy} onClick={() => void action(async () => onDocument(await window.amaneStock.cloudResolveShopPrices('retry-local')))}>确认使用待发价格</button>
+      <button type="button" disabled={busy} onClick={() => void action(async () => onDocument(await window.amaneStock.cloudResolveShopPrices('keep-shop')))}>采用商店价格</button>
+    </div>}
     {open && <div className="cloud-controls">
       {!status?.account ? <form onSubmit={login}>
         <strong>使用现有管理员账号登录</strong>
+        <small>服务地址：api.amaneacg.space。升级后请重新登录；本地库存和待同步记录会保留。</small>
         <label>用户名<input autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required maxLength={200} /></label>
         <label>密码<input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} required /></label>
         <button disabled={busy}>登录</button>

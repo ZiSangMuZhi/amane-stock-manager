@@ -52,7 +52,7 @@ describe('main-process authentication and IPC boundaries', () => {
 
   it('restores a saved session only after a server session check and adopts the current account', async () => {
     const vault = new TokenVault(await temporaryFile('session.encrypted'), encryption);
-    await vault.save(JSON.stringify({ '__Host-amane_admin_session': 'synthetic-session', '__Host-amane_admin_csrf': 'synthetic-csrf' }));
+    await vault.save(JSON.stringify({ origin: ADMIN_ORIGIN, cookies: { '__Host-amane_admin_session': 'synthetic-session', '__Host-amane_admin_csrf': 'synthetic-csrf' } }));
     let url = '';
     const client = new CloudClient(vault, async target => { url = String(target); return new Response(JSON.stringify({ authenticated: true, account: { ...account, id: 'new-account' } })); });
     expect(client.account).toBeNull(); await client.restore(); expect(url).toBe(`${ADMIN_ORIGIN}/api/auth/session`); expect(client.account?.id).toBe('new-account');

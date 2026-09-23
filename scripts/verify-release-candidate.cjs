@@ -7,8 +7,10 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { unzipSync } = require('fflate');
 const root = path.resolve(__dirname, '..');
-const version = process.argv[2] || '0.2.1';
+const version = process.argv[2] || require('../package.json').version;
+const fromVersion = process.argv[3] || '0.2.1';
 assert.match(version, /^\d+\.\d+\.\d+$/);
+assert.match(fromVersion, /^\d+\.\d+\.\d+$/);
 const directory = path.join(root, 'Releases');
 const output = path.join(root, 'artifacts', `release-candidate-${version}-${new Date().toISOString().replace(/[:.]/g, '-')}`);
 const sha = (value, algorithm = 'sha256') => createHash(algorithm).update(value).digest('hex');
@@ -70,7 +72,7 @@ async function inspectRuntimeZip(file, manifest, kind) {
   // Reproduce the installed client's version comparison using only an isolated
   // old manifest. The genuine updater file is copied for locator validation;
   // no updater executable, download, installation, or apply method is invoked.
-  const oldBytes = await fsp.readFile(path.join(directory, 'AmaneStockManager-0.2.0-full.nupkg'));
+  const oldBytes = await fsp.readFile(path.join(directory, `AmaneStockManager-${fromVersion}-full.nupkg`));
   const oldEntries = unzipSync(oldBytes, { filter: entry => entry.name.endsWith('.nuspec') || entry.name === 'lib/app/Squirrel.exe' });
   const oldSpecifications = Object.keys(oldEntries).filter(name => name.endsWith('.nuspec')); assert.equal(oldSpecifications.length, 1);
   const locatorRoot = path.join(output, 'isolated-update-check'), packages = path.join(locatorRoot, 'packages'); await fsp.mkdir(packages, { recursive: true });
@@ -78,9 +80,9 @@ async function inspectRuntimeZip(file, manifest, kind) {
   await fsp.writeFile(oldManifest, oldEntries[oldSpecifications[0]]); await fsp.writeFile(updaterPath, oldEntries['lib/app/Squirrel.exe']);
   const { UpdateManager } = require('velopack');
   const manager = new UpdateManager(directory, { AllowVersionDowngrade: false, ExplicitChannel: 'win', MaximumDeltasBeforeFallback: -1 }, { RootAppDir: locatorRoot, PackagesDir: packages, ManifestPath: oldManifest, UpdateExePath: updaterPath, CurrentBinaryDir: locatorRoot, IsPortable: true });
-  assert.equal(manager.getAppId(), 'AmaneStockManager'); assert.equal(manager.getCurrentVersion(), '0.2.0');
+  assert.equal(manager.getAppId(), 'AmaneStockManager'); assert.equal(manager.getCurrentVersion(), fromVersion);
   const update = await manager.checkForUpdatesAsync(); assert.equal(update.TargetFullRelease.Version, version); assert.equal(update.IsDowngrade, false);
-  report.updateDetection = { currentVersion: '0.2.0', availableVersion: version, downgrade: false, localFeedOnly: true, installOrApplyCalled: false };
+  report.updateDetection = { currentVersion: fromVersion, availableVersion: version, downgrade: false, localFeedOnly: true, installOrApplyCalled: false };
   report.suggestedFeed = { Assets: current };
   report.suggestedRELEASES = currentLines.map(entry => `${entry.sha1} ${entry.name} ${entry.bytes}`).join('\n') + '\n';
   report.advice = report.requiresFeedStaging ? 'Preserve local Releases and older GitHub releases. In a separate publish staging directory, use the listed current binaries, identical JSON feeds containing only current Full/Delta, and RELEASES with only those package lines. Re-hash the staged feeds before upload; do not upload old multi-GB packages.' : 'The listed assets can be staged unchanged. Preserve older local files and GitHub releases; publish only this explicit list.';

@@ -17,10 +17,15 @@ export class CloudController {
   private engine: SyncEngine | null = null;
   private status: CloudStatus = { state: 'local-only', message: '本地库存可离线使用。登录后选择连接才会上传。', account: null, secureStorage: false, connected: false, pending: false, lastSuccess: null };
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private scheduleGeneration = 0;
   private controls = Promise.resolve();
   constructor(readonly client: CloudClient, private readonly journals: JournalStore, private readonly host: CloudHost) {}
   snapshot(): CloudStatus {
-    return { ...this.status, account: this.client.account, secureStorage: this.client.secureStorage, connected: Boolean(this.engine), pending: Boolean(this.engine?.journal.pending) || this.status.state === 'queued', lastSuccess: this.engine?.journal.lastSuccess ?? null };
+    const journal = this.engine?.journal;
+    return { ...this.status, account: this.client.account, secureStorage: this.client.secureStorage, connected: Boolean(this.engine),
+      inventoryId: journal?.inventoryId, registeredBarcodes: journal?.registeredBarcodes,
+      shopPriceConflict: journal?.shopPriceConflict === true, shopPricePendingCount: journal?.shopPricePending?.length ?? 0,
+      pending: Boolean(journal?.pending || journal?.shopPricePending?.length) || this.status.state === 'queued', lastSuccess: journal?.lastSuccess ?? null };
   }
   private emit(patch: Partial<CloudStatus> = {}): CloudStatus { this.status = { ...this.status, ...patch }; const current = this.snapshot(); this.host.emit(current); return current; }
   control<T>(task: () => Promise<T>): Promise<T> {
@@ -37,6 +42,12 @@ export class CloudController {
     return new SyncEngine(journal, {
       server: ADMIN_ORIGIN, read: filePath => this.host.read(filePath), change: this.host.change,
       save: value => this.journals.save(value),
+      shopPrices: {
+        stock: id => this.client.stock('GET', id),
+        products: () => this.client.products(),
+        product: id => this.client.product(id),
+        saveProductPrice: (id, body) => this.client.saveProductPrice(id, body)
+      },
       request: (method, id, body) => {
         const account = this.client.requireAccount();
         if (account.id !== journal.accountId) throw new CloudError('账号已改变，原账号的待发内容已保留。', 401);
@@ -45,7 +56,7 @@ export class CloudController {
       report: (state, message, _journal, payloadBytes) => this.emit({ state, message, payloadBytes })
     });
   }
-  async pause(): Promise<void> { clearTimeout(this.timer); await this.engine?.pause(); }
+  async pause(): Promise<void> { clearTimeout(this.timer); this.scheduleGeneration++; await this.engine?.pause(); }
   async selectCurrent(): Promise<void> {
     await this.pause(); this.engine = null;
     const document = this.host.current(), account = this.client.account;
@@ -58,10 +69,17 @@ export class CloudController {
   }
   schedule(delay = 800): void {
     clearTimeout(this.timer);
+    const generation = ++this.scheduleGeneration;
     if (!this.engine) return;
+    if (this.engine.journal.shopPriceConflict) {
+      this.emit({ state: 'error', message: '库存已同步，商店价格冲突待处理；待发价格已保留。' });
+      return;
+    }
     if (!['uploading', 'downloading', 'conflict'].includes(this.status.state)) this.emit({ state: 'queued', message: '本地已保存，等待同步。' });
-    this.timer = setTimeout(() => { void this.retry().finally(() => {
-      if (this.engine && this.status.state !== 'expired' && this.status.state !== 'conflict') this.timer = setTimeout(() => this.schedule(0), 30000);
+    this.timer = setTimeout(() => { void this.retry().catch(error => {
+      this.emit({ state: 'error', message: `同步未完成，恢复记录已保留。${error instanceof Error ? error.message : '请检查本地文件是否可写后重试。'}` });
+    }).finally(() => {
+      if (generation === this.scheduleGeneration && this.engine && !this.engine.journal.shopPriceConflict && this.status.state !== 'expired' && this.status.state !== 'conflict') this.timer = setTimeout(() => this.schedule(0), 30000);
     }); }, delay);
     this.timer.unref();
   }
@@ -104,7 +122,7 @@ export class CloudController {
       const record = await this.client.stock('GET', id);
       const document = await this.host.download(record);
       if (document.inventory?.inventoryId !== id || !document.filePath) { await this.selectCurrent(); return document; }
-      const journal: SyncJournal = { accountId: account.id, filePath: document.filePath, inventoryId: id, version: record.version, baseHash: inventoryHash(record.inventory), pending: null, conflict: false, lastSuccess: new Date().toISOString() };
+      const journal: SyncJournal = { accountId: account.id, filePath: document.filePath, inventoryId: id, version: record.version, baseHash: inventoryHash(record.inventory), pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes, lastSuccess: new Date().toISOString() };
       await this.journals.save(journal);
       this.engine = this.makeEngine(journal);
       this.emit({ state: 'synced', message: '云端库存已保存为本地文件并连接。' });
@@ -137,6 +155,14 @@ export class CloudController {
       this.engine = null;
       await this.connect();
     } else throw new CloudError('无效的冲突处理方式。', 400);
+    return this.host.current();
+  }
+  async resolveShopPrices(choice: 'retry-local' | 'keep-shop'): Promise<InventoryDocument> {
+    if (!this.engine || !this.engine.journal.shopPriceConflict) throw new CloudError('没有待处理的商店价格冲突。', 400);
+    if (choice !== 'retry-local' && choice !== 'keep-shop') throw new CloudError('无效的价格冲突处理方式。', 400);
+    await this.pause();
+    await this.engine.resolveShopPrices(choice);
+    this.schedule(0);
     return this.host.current();
   }
 }

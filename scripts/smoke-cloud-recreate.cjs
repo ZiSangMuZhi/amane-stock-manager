@@ -90,7 +90,7 @@ async function native() {
   };
   global.fetch = async (target, request = {}) => {
     const url = new URL(String(target)), method = request.method || 'GET';
-    if (url.origin !== 'https://amane-admin-mtjbdhzwkq-uc.a.run.app') { state.blocked.push(url.origin + url.pathname); persist(); throw new Error('Synthetic test blocked external request'); }
+    if (url.origin !== 'https://api.amaneacg.space') { state.blocked.push(url.origin + url.pathname); persist(); throw new Error('Synthetic test blocked external request'); }
     const route = url.pathname;
     if (route === '/api/auth/login') {
       const headers = new Headers({ 'content-type': 'application/json' }); headers.append('set-cookie', '__Host-amane_admin_session=synthetic-session; Path=/; Secure; HttpOnly'); headers.append('set-cookie', '__Host-amane_admin_csrf=synthetic-csrf; Path=/; Secure');

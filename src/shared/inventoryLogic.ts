@@ -104,7 +104,11 @@ export function updateShop(inventory: InventoryFile, barcode: string, shop: Shop
   const next = cloneInventory(inventory);
   const item = next.items[normalizeBarcode(barcode)];
   if (!item) return inventory;
+  const priceChanged = ['originalCents', 'currentCents', 'discountBps', 'priceSource'].some(
+    key => item.shop[key as keyof ShopFields] !== normalized[key as keyof ShopFields]
+  );
   item.shop = normalized;
+  if (priceChanged && item.priceCurrency === 'CAD') item.salePriceAmount = normalized.currentCents / 100;
   item.updatedAt = next.updatedAt = nowIso();
   return next;
 }
@@ -203,8 +207,16 @@ export function updatePrice(
   if (!item) {
     return inventory;
   }
+  const sale = normalizePriceAmount(salePriceAmount);
+  // A currency selector changes the internal unit; it is never an exchange-rate operation.
+  // Only an explicit CAD sale edit changes the shop. Clearing a field never makes a product free.
+  if (priceCurrency === 'CAD' && item.priceCurrency === 'CAD' && sale !== null && sale !== item.salePriceAmount) {
+    const currentCents = Math.round(sale * 100);
+    item.shop = canonicalShop({ ...item.shop, priceSource: 'current', currentCents,
+      originalCents: Math.max(item.shop.originalCents, currentCents) });
+  }
   item.priceAmount = normalizePriceAmount(purchasePriceAmount);
-  item.salePriceAmount = normalizePriceAmount(salePriceAmount);
+  item.salePriceAmount = sale;
   item.priceCurrency = priceCurrency;
   item.updatedAt = timestamp;
   next.items[barcode] = item;

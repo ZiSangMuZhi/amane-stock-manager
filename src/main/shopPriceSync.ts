@@ -40,13 +40,25 @@ export function sameShopPrice(a: ShopPrice, b: ShopPrice): boolean {
   return JSON.stringify(shopPrice(a)) === JSON.stringify(shopPrice(b));
 }
 
+// Only fixed client diagnostics may cross this boundary; never render arbitrary transport text.
+const forbiddenDiagnostics = new Set([
+  '服务器拒绝了写入来源或会话校验，请确认使用最新版本并重新登录；本地内容与待发请求已保留。',
+  '当前账号缺少此操作所需的管理权限，请联系管理员授权；本地内容与待发请求已保留。',
+  '当前账号没有定价管理权限，不能修改进价、售价或商店定价；本地内容与待发请求已保留。',
+  '服务器拒绝了此操作（HTTP 403），本地内容与待发请求已保留。',
+  '此账号没有商店商品及价格管理权限。',
+  '此账号没有商店商品管理权限。',
+]);
+
 function priceError(error: unknown): ShopPriceSyncError {
   if (error instanceof ShopPriceSyncError) return error;
   const status = error instanceof CloudError ? error.status : 0;
+  const forbidden = error instanceof CloudError && forbiddenDiagnostics.has(error.message)
+    ? error.message : '商店价格请求被服务器拒绝（HTTP 403）。';
   const detail = status === 409 ? '商店价格冲突，请选择保留商店价格或重新应用本地价格。'
     : [404, 410].includes(status) ? '商店商品已删除或不存在，请先在商店管理中检查商品。'
     : status === 401 ? '登录已过期，请重新登录后继续商店价格同步。'
-    : status === 403 ? '账号没有商店商品或价格管理权限，待发价格已保留。'
+    : status === 403 ? `${forbidden} 待发价格已保留。`
     : status ? `商店价格服务暂时失败（${status}），待发价格已保留，请重试。`
     : '商店价格同步中断，待发价格已保留，请重试。';
   return new ShopPriceSyncError(`库存已同步，${detail}`, status, status === 409);

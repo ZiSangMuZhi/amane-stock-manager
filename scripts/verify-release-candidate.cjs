@@ -8,7 +8,7 @@ const { createHash } = require('node:crypto');
 const { unzipSync } = require('fflate');
 const root = path.resolve(__dirname, '..');
 const version = process.argv[2] || require('../package.json').version;
-const fromVersion = process.argv[3] || '0.2.1';
+const fromVersion = process.argv[3] || '0.2.2';
 assert.match(version, /^\d+\.\d+\.\d+$/);
 assert.match(fromVersion, /^\d+\.\d+\.\d+$/);
 const directory = path.join(root, 'Releases');

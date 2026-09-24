@@ -1,4 +1,4 @@
-# 商店价格同步（0.2.2）
+# 商店价格同步（0.2.3）
 
 ## 价格操作
 
@@ -24,12 +24,13 @@
 
 价格冲突和库存版本冲突分开处理。用户可明确重新应用待发价格，或采用商店价格。采用商店价格只替换仍等于待发值的本地价格，不覆盖同步期间产生的新编辑；随后按普通库存同步保存。
 
-`GET /api/products`、`GET /api/products/:id` 和 `PUT /api/products/:id` 使用网站已有权限与审计。已注册商品价格写入需要 `content.manage`、`products.manage`、`pricing.manage`。普通库存进价不公开。新订单读取新价，已有订单快照保持原值。
+`GET /api/products`、`GET /api/products/:id` 和 `PUT /api/products/:id` 使用网站已有权限与审计。库存使用 `inventory.manage`，商品使用 `products.manage`；两者均兼容服务端的旧 `content.manage` 权限。改价还必须具备独立的 `pricing.manage`。普通库存进价不公开。新订单读取新价，已有订单快照保持原值。
 
 ## 迁移与恢复
 
 - 固定服务地址为 `https://api.amaneacg.space`，禁止从库存文件或 renderer 传入任意目标地址。
-- 新登录凭据使用独立、带 origin 的加密存储；旧 GCP cookie 不发送至新服务，首次升级需重新登录。
+- v0.2.3 起，管理员请求的固定 `Origin` 为 `https://console.amaneacg.space`，匹配服务端 `ADMIN_PUBLIC_ORIGIN`。这与 API 网络目标及 cookie 加密存储的 origin 分开管理。CSRF token 仍为所有写入请求的必需校验，不能通过放宽服务端校验来解决地址错误。
+- 新登录凭据使用独立、带 origin 的加密存储；旧 GCP cookie 不发送至新服务。从 0.2.1 或更早版本升级需重新登录，0.2.2 的现有登录可继续使用。
 - 库存 schema 不变。同步日志继续绑定账号、文件路径和库存 ID。离线修改、退出登录和换文件不会把待发数据交给另一个账号。
 - 保留原有云库存删除后的自动备份、重建逻辑。旧商品的待发价不转交给新库存 ID。
 - 不删除同步日志来“修复”问题；它包含恢复所需的原请求。日志是私有资料，不应提交 Git 或公开发布。
@@ -42,7 +43,7 @@ npm run lint
 npm run build
 node_modules/electron/dist/electron.exe scripts/smoke-shop-prices.cjs
 node scripts/smoke-cloud-recreate.cjs
-node scripts/verify-release-candidate.cjs 0.2.2 0.2.1
+node scripts/verify-release-candidate.cjs 0.2.3 0.2.2
 ```
 
 原生 smoke 使用真实 Electron、sandbox preload、IPC、文件落盘与合成服务，涵盖响应丢失重放、库存/价格部分成功、元数据保留、价格冲突两种处理。发布时还需验证打包运行时、升级发现与 GitHub 资产哈希；这些测试不等同于真实线上账号改价验收。

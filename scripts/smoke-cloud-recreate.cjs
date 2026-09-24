@@ -103,7 +103,7 @@ async function native() {
     const id = body?.inventory?.inventoryId || route.split('/').at(-1);
     const entry = { method, route, id, body: request.body || null };
     state.requests.push(entry); persist();
-    if (method !== 'GET') { assert.equal(request.headers['X-CSRF-Token'], 'synthetic-csrf'); assert.ok(body.requestKey); }
+    if (method !== 'GET') { assert.equal(request.headers.Origin, 'https://console.amaneacg.space'); assert.equal(request.headers['X-CSRF-Token'], 'synthetic-csrf'); assert.ok(body.requestKey); }
     if (state.active && id === initialId) {
       if (fixture.name === 'network') throw new Error('Synthetic disconnected transport');
       if (fixture.name === 'forbidden') return json({ error: 'STOCK_REQUEST_FAILED' }, 403);

@@ -6,6 +6,9 @@ import type { ShopProduct } from './shopPriceSync';
 
 // Deployment host is a build-time constant, never a renderer argument or an imported file setting.
 export const ADMIN_ORIGIN = 'https://api.amaneacg.space';
+// Mutations use the administrator UI origin required by the server's CSRF guard.
+// Transport destinations and encrypted cookies remain scoped to ADMIN_ORIGIN.
+export const ADMIN_REQUEST_ORIGIN = 'https://console.amaneacg.space';
 export const ADMIN_SESSION_FILE = 'admin-session-api.amaneacg.space.encrypted';
 const SESSION_COOKIE = '__Host-amane_admin_session';
 const CSRF_COOKIE = '__Host-amane_admin_csrf';
@@ -110,12 +113,12 @@ export class CloudClient {
   }
   requireAccount(): CloudAccount {
     const account = this.authenticatedAccount();
-    if (!account.permissions.includes('content.manage')) throw new CloudError('此账号没有库存管理权限。', 403);
+    if (!account.permissions.some(permission => permission === 'inventory.manage' || permission === 'content.manage')) throw new CloudError('此账号没有库存管理权限。', 403);
     return account;
   }
   private requireProductAccount(write = false): void {
     const account = this.authenticatedAccount();
-    if (!account.permissions.includes('products.manage') || (write && !account.permissions.includes('pricing.manage'))) {
+    if (!account.permissions.some(permission => permission === 'products.manage' || permission === 'content.manage') || (write && !account.permissions.includes('pricing.manage'))) {
       throw new CloudError(write ? '此账号没有商店商品及价格管理权限。' : '此账号没有商店商品管理权限。', 403);
     }
   }
@@ -184,7 +187,7 @@ export class CloudClient {
   }
   private async fetchResponse(method: string, route: string, body?: string): Promise<Response> {
     if (!allowedRoute(method, route)) throw new CloudError('请求路径无效。', 400);
-    const headers: Record<string, string> = { Accept: 'application/json', Origin: ADMIN_ORIGIN };
+    const headers: Record<string, string> = { Accept: 'application/json', Origin: ADMIN_REQUEST_ORIGIN };
     if (body) { if (Buffer.byteLength(body) > 16 * 1024 * 1024) throw new CloudError('库存超过 16 MiB 同步限制。', 413, true); headers['Content-Type'] = 'application/json'; }
     if (this.cookies.size) headers.Cookie = [...this.cookies].map(([k,v]) => `${k}=${v}`).join('; ');
     if (this.cookies.has(CSRF_COOKIE)) headers['X-CSRF-Token'] = this.cookies.get(CSRF_COOKIE)!;
@@ -208,15 +211,32 @@ export class CloudClient {
     if (changed) await this.vault.save(JSON.stringify({ origin: ADMIN_ORIGIN, cookies: Object.fromEntries(this.cookies) }));
     if (!response.ok) {
       if (response.status === 401) { this.account = null; }
-      let inventoryMissing = false;
-      if ([404, 410].includes(response.status) && /^\/api\/stock-books(?:\/[0-9a-f-]+)?$/i.test(route) &&
+      const stockRoute = /^\/api\/stock-books(?:\/[0-9a-f-]+)?$/i.test(route);
+      const productRoute = /^\/api\/products(?:\/[0-9a-f-]+)?$/i.test(route);
+      let errorCode: string | undefined;
+      let pricingDenied = false;
+      if ([403, 404, 410].includes(response.status) &&
           /^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
-        // Only the stock API's explicit absence response can recreate a book.
-        // A proxy/router 404, permission failure, or unreadable response must keep the old binding.
-        try { inventoryMissing = JSON.parse((await this.readBytes(response, 16 * 1024)).toString('utf8')).error === 'STOCK_REQUEST_FAILED'; }
+        // Consume error bodies once, with a small bound. Only known codes and exact service
+        // messages select local copy; server text, HTML and credentials never reach the UI.
+        try {
+          const payload: unknown = JSON.parse((await this.readBytes(response, 16 * 1024)).toString('utf8'));
+          if (object(payload)) {
+            if (typeof payload.error === 'string') errorCode = payload.error;
+            pricingDenied = (stockRoute && errorCode === 'STOCK_REQUEST_FAILED' &&
+              (payload.message === '当前账号没有定价管理权限。' || payload.message === '当前账号没有定价管理权限，不能修改进价、售价或商店定价。')) ||
+              (productRoute && errorCode === 'PRODUCT_REQUEST_FAILED' && payload.message === '当前账号没有定价管理权限，可以编辑名称、图片和库存。');
+          }
+        }
         catch { /* Keep the original HTTP failure without changing local identity. */ }
       }
-      const errors: Record<number, string> = { 401: '登录已失效或用户名密码错误，请重新登录。', 403: '当前账号没有权限，或会话安全校验已失效。', 409: '云端已更新，请选择冲突处理方式。', 428: '请先更新首次登录密码。' };
+      // Only explicit absence from the stock API can recreate a book, never a 403 or product error.
+      const inventoryMissing = [404, 410].includes(response.status) && stockRoute && errorCode === 'STOCK_REQUEST_FAILED';
+      const forbidden = errorCode === 'REQUEST_VERIFICATION_FAILED' ? '服务器拒绝了写入来源或会话校验，请确认使用最新版本并重新登录；本地内容与待发请求已保留。'
+        : errorCode === 'PERMISSION_DENIED' ? '当前账号缺少此操作所需的管理权限，请联系管理员授权；本地内容与待发请求已保留。'
+        : pricingDenied ? '当前账号没有定价管理权限，不能修改进价、售价或商店定价；本地内容与待发请求已保留。'
+        : '服务器拒绝了此操作（HTTP 403），本地内容与待发请求已保留。';
+      const errors: Record<number, string> = { 401: '登录已失效或用户名密码错误，请重新登录。', 403: forbidden, 409: '云端已更新，请选择冲突处理方式。', 428: '请先更新首次登录密码。' };
       throw new CloudError(inventoryMissing ? '云端库存已删除或不存在，本地内容已保留。' : errors[response.status] ?? `服务器拒绝请求（HTTP ${response.status}），本地内容已保留。`, response.status, [400, 413].includes(response.status), inventoryMissing);
     }
     return response;

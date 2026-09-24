@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ADMIN_ORIGIN, ADMIN_SESSION_FILE, CloudClient } from '../src/main/cloudClient';
+import { ADMIN_ORIGIN, ADMIN_REQUEST_ORIGIN, ADMIN_SESSION_FILE, CloudClient } from '../src/main/cloudClient';
 import type { TokenVault } from '../src/main/cloudStore';
 import type { ShopProduct } from '../src/main/shopPriceSync';
+import { createInventory } from '../src/shared/inventoryLogic';
 
 const id = 'a71c05f0-9c2f-4a5f-ae9f-b5298d5c0602';
 const sourceBookId = 'c6ab6f95-3504-4de1-89bf-2b2c4126709f';
@@ -23,11 +24,14 @@ function fixture(transport: typeof fetch = async url => response(String(url).end
 describe('API host and persisted session isolation', () => {
   it('pins the production API host and a separate encrypted session filename', () => {
     expect(ADMIN_ORIGIN).toBe('https://api.amaneacg.space');
+    expect(ADMIN_REQUEST_ORIGIN).toBe('https://console.amaneacg.space');
+    expect(ADMIN_REQUEST_ORIGIN).not.toBe(ADMIN_ORIGIN);
     expect(ADMIN_SESSION_FILE).toBe('admin-session-api.amaneacg.space.encrypted');
   });
   it.each([
     cookies,
     { origin: 'https://amane-admin-mtjbdhzwkq-uc.a.run.app', cookies },
+    { origin: ADMIN_REQUEST_ORIGIN, cookies },
     { origin: 'https://api.amaneacg.space.evil.invalid', cookies },
     { origin: 'http://api.amaneacg.space', cookies },
     { origin: `${ADMIN_ORIGIN}/`, cookies },
@@ -45,7 +49,7 @@ describe('API host and persisted session isolation', () => {
     client.account = null; await client.restore();
     expect(client.account).toMatchObject({ id: 'current-server-account' });
     expect(requests[0]?.url).toBe(`${ADMIN_ORIGIN}/api/auth/session`);
-    expect(requests[0]?.options.headers).toMatchObject({ Cookie: '__Host-amane_admin_session=synthetic-session; __Host-amane_admin_csrf=synthetic-csrf', Origin: ADMIN_ORIGIN, 'X-CSRF-Token': 'synthetic-csrf' });
+    expect(requests[0]?.options.headers).toMatchObject({ Cookie: '__Host-amane_admin_session=synthetic-session; __Host-amane_admin_csrf=synthetic-csrf', Origin: 'https://console.amaneacg.space', 'X-CSRF-Token': 'synthetic-csrf' });
   });
   it('persists only the host-bound cookie envelope after login', async () => {
     const headers = new Headers({ 'content-type': 'application/json' });
@@ -58,6 +62,31 @@ describe('API host and persisted session isolation', () => {
     const saved = vault.save.mock.calls[0]![0];
     expect(JSON.parse(saved)).toEqual({ origin: ADMIN_ORIGIN, cookies });
     expect(saved).not.toContain('never-persist-password'); expect(JSON.stringify(client.account)).not.toContain('synthetic-session');
+  });
+  it('sends stock and product mutations to the API with the independent console origin and matching CSRF cookie', async () => {
+    const inventory = { ...createInventory('Synthetic mutation'), inventoryId: id };
+    const record = { id, version: 2, inventory, updatedAt: new Date().toISOString() };
+    const { client, requests, vault } = fixture(async (url, options = {}) => {
+      expect(new URL(String(url)).origin).toBe('https://api.amaneacg.space');
+      const headers = new Headers(options.headers);
+      expect(headers.get('origin')).toBe('https://console.amaneacg.space');
+      if (String(url).endsWith('/login')) {
+        expect(headers.has('cookie')).toBe(false); expect(headers.has('x-csrf-token')).toBe(false);
+        const responseHeaders = new Headers({ 'content-type': 'application/json' });
+        responseHeaders.append('set-cookie', '__Host-amane_admin_session=synthetic-session; Path=/; Secure; HttpOnly');
+        responseHeaders.append('set-cookie', '__Host-amane_admin_csrf=synthetic-csrf; Path=/; Secure');
+        return new Response(JSON.stringify({ account }), { headers: responseHeaders });
+      }
+      expect(headers.get('cookie')).toBe('__Host-amane_admin_session=synthetic-session; __Host-amane_admin_csrf=synthetic-csrf');
+      expect(headers.get('x-csrf-token')).toBe('synthetic-csrf');
+      expect(options.redirect).toBe('error');
+      return response(String(url).includes('/stock-books') ? record : product);
+    });
+    await client.login('synthetic', 'never-persist-password');
+    const stockBody = JSON.stringify({ inventory, requestKey, version: 1 });
+    await client.stock('PUT', id, stockBody); await client.saveProductPrice(id, body);
+    expect(requests[1]?.options.body).toBe(stockBody); expect(requests[2]?.options.body).toBe(body);
+    expect(JSON.parse(vault.save.mock.calls[0]![0])).toEqual({ origin: 'https://api.amaneacg.space', cookies });
   });
   it.each([
     '__Host-amane_admin_session=unsafe; Path=/',
@@ -91,21 +120,29 @@ describe('fixed catalog transport and permissions', () => {
       ['GET', `${ADMIN_ORIGIN}/api/products`], ['GET', `${ADMIN_ORIGIN}/api/products/${id}`], ['PUT', `${ADMIN_ORIGIN}/api/products/${id}`],
     ]);
     expect(requests[2]?.options.body).toBe(body);
-    expect(requests.every(r => r.options.redirect === 'error' && (r.options.headers as Record<string, string>).Origin === ADMIN_ORIGIN)).toBe(true);
+    expect(requests.every(r => r.options.redirect === 'error' && (r.options.headers as Record<string, string>).Origin === 'https://console.amaneacg.space')).toBe(true);
   });
-  it('keeps stock, product-read and product-price permissions independent', async () => {
-    const { client, requests } = fixture();
-    client.account = { ...account, permissions: ['content.manage'] };
-    await expect(client.products()).rejects.toMatchObject({ status: 403 });
-    await expect(client.product(id)).rejects.toMatchObject({ status: 403 });
-    client.account = { ...account, permissions: ['products.manage'] };
-    expect(await client.products()).toEqual([product]);
-    await expect(client.books()).rejects.toMatchObject({ status: 403 });
-    await expect(client.saveProductPrice(id, body)).rejects.toMatchObject({ status: 403 });
-    client.account = { ...account, permissions: ['pricing.manage'] };
-    await expect(client.saveProductPrice(id, body)).rejects.toMatchObject({ status: 403 });
-    client.account = { ...account, permissions: ['products.manage', 'pricing.manage'] };
-    expect(await client.saveProductPrice(id, body)).toEqual(product); expect(requests).toHaveLength(2);
+  it.each([
+    { permissions: ['inventory.manage'], stock: true, read: false, write: false },
+    { permissions: ['products.manage'], stock: false, read: true, write: false },
+    { permissions: ['content.manage'], stock: true, read: true, write: false },
+    { permissions: ['pricing.manage'], stock: false, read: false, write: false },
+    { permissions: ['inventory.manage', 'pricing.manage'], stock: true, read: false, write: false },
+    { permissions: ['products.manage', 'pricing.manage'], stock: false, read: true, write: true },
+    { permissions: ['content.manage', 'pricing.manage'], stock: true, read: true, write: true },
+    { permissions: ['inventory.manage', 'products.manage'], stock: true, read: true, write: false },
+    { permissions: ['events.manage', 'admin.manage'], stock: false, read: false, write: false },
+    { permissions: [], stock: false, read: false, write: false },
+  ])('matches dedicated permissions and the one-way legacy content alias: $permissions', async policy => {
+    const { client, requests } = fixture(async url => response(String(url).endsWith('/stock-books') ? { items: [] } : String(url).endsWith('/products') ? { items: [product] } : product));
+    client.account = { ...account, permissions: policy.permissions };
+    if (policy.stock) expect(await client.books()).toEqual([]);
+    else await expect(client.books()).rejects.toMatchObject({ status: 403 });
+    if (policy.read) { expect(await client.products()).toEqual([product]); expect(await client.product(id)).toEqual(product); }
+    else { await expect(client.products()).rejects.toMatchObject({ status: 403 }); await expect(client.product(id)).rejects.toMatchObject({ status: 403 }); }
+    if (policy.write) expect(await client.saveProductPrice(id, body)).toEqual(product);
+    else await expect(client.saveProductPrice(id, body)).rejects.toMatchObject({ status: 403 });
+    expect(requests).toHaveLength(Number(policy.stock) + Number(policy.read) * 2 + Number(policy.write));
   });
   it.each([null, { ...account, mustChangePassword: true }])('requires an authenticated account with no forced password change', async accountValue => {
     const { client, requests } = fixture(); client.account = accountValue;
@@ -133,7 +170,7 @@ describe('fixed catalog transport and permissions', () => {
     const { client, vault, requests } = fixture(async () => new Response(null, { status, headers: { location: 'https://evil.invalid', 'set-cookie': '__Host-amane_admin_session=unsafe; Secure; Path=/' } }));
     await expect(client.products()).rejects.toMatchObject({ status: 502 }); expect(vault.save).not.toHaveBeenCalled(); expect(requests).toHaveLength(1);
   });
-  it.each([{ url: 'https://evil.invalid/api/products', redirected: false }, { url: `${ADMIN_ORIGIN}/api/products`, redirected: true }])('rejects responses that bypassed redirect:error %#', async attributes => {
+  it.each([{ url: 'https://evil.invalid/api/products', redirected: false }, { url: `${ADMIN_REQUEST_ORIGIN}/api/products`, redirected: false }, { url: `${ADMIN_ORIGIN}/api/products`, redirected: true }])('rejects responses that bypassed redirect:error %#', async attributes => {
     const result = response({ items: [product] }, 200, { 'set-cookie': '__Host-amane_admin_session=unsafe; Secure; Path=/' });
     Object.defineProperties(result, { url: { value: attributes.url }, redirected: { value: attributes.redirected } });
     const { client, vault } = fixture(async () => result);
@@ -199,5 +236,73 @@ describe('catalog response and request validation', () => {
   it('validates the PUT response identity and content too', async () => {
     const { client } = fixture(async () => response({ ...product, id: sourceBookId }));
     await expect(client.saveProductPrice(id, body)).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe('bounded server error diagnostics', () => {
+  const verification = '服务器拒绝了写入来源或会话校验，请确认使用最新版本并重新登录；本地内容与待发请求已保留。';
+  const permission = '当前账号缺少此操作所需的管理权限，请联系管理员授权；本地内容与待发请求已保留。';
+  const pricing = '当前账号没有定价管理权限，不能修改进价、售价或商店定价；本地内容与待发请求已保留。';
+  const fallback = '服务器拒绝了此操作（HTTP 403），本地内容与待发请求已保留。';
+  it.each([
+    { target: 'stock', payload: { error: 'REQUEST_VERIFICATION_FAILED', message: 'synthetic-secret-never-render' }, message: verification },
+    { target: 'product', payload: { error: 'REQUEST_VERIFICATION_FAILED' }, message: verification },
+    { target: 'stock', payload: { error: 'PERMISSION_DENIED', message: 'synthetic-secret-never-render' }, message: permission },
+    { target: 'product', payload: { error: 'PERMISSION_DENIED' }, message: permission },
+    { target: 'stock', payload: { error: 'STOCK_REQUEST_FAILED', message: '当前账号没有定价管理权限。' }, message: pricing },
+    { target: 'stock', payload: { error: 'STOCK_REQUEST_FAILED', message: '当前账号没有定价管理权限，不能修改进价、售价或商店定价。' }, message: pricing },
+    { target: 'product', payload: { error: 'PRODUCT_REQUEST_FAILED', message: '当前账号没有定价管理权限，可以编辑名称、图片和库存。' }, message: pricing },
+    { target: 'stock', payload: { error: 'STOCK_REQUEST_FAILED', message: '当前账号没有定价管理权限。synthetic-secret-never-render' }, message: fallback },
+    { target: 'product', payload: { error: 'PRODUCT_REQUEST_FAILED', message: 'synthetic-secret-never-render' }, message: fallback },
+    { target: 'product', payload: { error: 'STOCK_REQUEST_FAILED', message: '当前账号没有定价管理权限。' }, message: fallback },
+    { target: 'stock', payload: { error: 'PRODUCT_REQUEST_FAILED', message: '当前账号没有定价管理权限，可以编辑名称、图片和库存。' }, message: fallback },
+    { target: 'stock', payload: { error: 'synthetic-secret-never-render', message: 'synthetic-secret-never-render' }, message: fallback },
+    { target: 'stock', payload: [{ error: 'PERMISSION_DENIED' }], message: fallback },
+    { target: 'stock', payload: null, message: fallback },
+  ])('maps only known 403 codes and exact service pricing messages %#', async scenario => {
+    const result = response(scenario.payload, 403);
+    const getReader = vi.spyOn(result.body!, 'getReader');
+    const { client, requests } = fixture(async () => result);
+    const action = scenario.target === 'stock' ? client.stock('PUT', id, '{}') : client.saveProductPrice(id, body);
+    await expect(action).rejects.toMatchObject({ status: 403, inventoryMissing: false, definitiveRejection: false, message: scenario.message });
+    expect(getReader).toHaveBeenCalledOnce(); expect(requests).toHaveLength(1);
+  });
+  it.each([
+    { text: '<html>synthetic-secret-never-render</html>', type: 'text/html' },
+    { text: JSON.stringify({ error: 'REQUEST_VERIFICATION_FAILED' }), type: 'text/plain' },
+    { text: '{broken synthetic-secret-never-render', type: 'application/json' },
+  ])('retains a safe 403 fallback for HTML, non-JSON or malformed bodies %#', async scenario => {
+    const { client } = fixture(async () => new Response(scenario.text, { status: 403, headers: { 'content-type': scenario.type } }));
+    await expect(client.stock('PUT', id, '{}')).rejects.toMatchObject({ status: 403, message: fallback, inventoryMissing: false });
+  });
+  it('does not read declared oversized diagnostics or replace the original HTTP status', async () => {
+    const result = response({ error: 'PERMISSION_DENIED' }, 403, { 'content-length': String(16 * 1024 + 1) });
+    const getReader = vi.spyOn(result.body!, 'getReader');
+    const { client } = fixture(async () => result);
+    await expect(client.stock('PUT', id, '{}')).rejects.toMatchObject({ status: 403, message: fallback, inventoryMissing: false });
+    expect(getReader).not.toHaveBeenCalled();
+  });
+  it('cancels streamed diagnostics exceeding 16 KiB and does not expose any body text', async () => {
+    const cancel = vi.fn();
+    const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: 'PERMISSION_DENIED', message: 'synthetic-secret-never-render'.repeat(1000) }))); }, cancel });
+    const { client } = fixture(async () => new Response(stream, { status: 403, headers: { 'content-type': 'application/json' } }));
+    await expect(client.stock('PUT', id, '{}')).rejects.toMatchObject({ status: 403, message: fallback, inventoryMissing: false });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+  it.each([404, 410])('uses the same single bounded read for explicit stock absence (%i)', async status => {
+    const result = response({ error: 'STOCK_REQUEST_FAILED', message: 'synthetic-secret-never-render' }, status);
+    const getReader = vi.spyOn(result.body!, 'getReader');
+    const { client } = fixture(async () => result);
+    await expect(client.stock('GET', id)).rejects.toMatchObject({ status, inventoryMissing: true, message: '云端库存已删除或不存在，本地内容已保留。' });
+    expect(getReader).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { status: 404, payload: { error: 'REQUEST_VERIFICATION_FAILED' } },
+    { status: 410, payload: { error: 'PERMISSION_DENIED' } },
+    { status: 404, payload: { error: 'PRODUCT_REQUEST_FAILED' } },
+    { status: 410, payload: { error: 'Not Found' } },
+  ])('never treats unrelated JSON errors as missing stock %#', async scenario => {
+    const { client } = fixture(async () => response(scenario.payload, scenario.status));
+    await expect(client.stock('GET', id)).rejects.toMatchObject({ status: scenario.status, inventoryMissing: false });
   });
 });

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ADMIN_ORIGIN, CloudClient } from '../src/main/cloudClient';
+import { ADMIN_ORIGIN, ADMIN_REQUEST_ORIGIN, CloudClient } from '../src/main/cloudClient';
 import { JournalStore, TokenVault } from '../src/main/cloudStore';
 import { isTrustedSender } from '../src/main/trustedIpc';
 import { SyncJournal } from '../src/main/cloudSync';
@@ -43,6 +43,7 @@ describe('main-process authentication and IPC boundaries', () => {
     await client.login('synthetic', 'ephemeral-password'); await client.books();
     expect(requests.every(r => r.url.startsWith(`${ADMIN_ORIGIN}/api/`) && r.options.redirect === 'error')).toBe(true);
     const headers = requests[1]!.options.headers as Record<string,string>;
+    expect(headers.Origin).toBe('https://console.amaneacg.space'); expect(headers.Origin).toBe(ADMIN_REQUEST_ORIGIN);
     expect(headers.Cookie).toContain('__Host-amane_admin_session=synthetic-session'); expect(headers.Cookie).not.toContain('ignored-cookie');
     expect(headers['X-CSRF-Token']).toBe('synthetic-csrf'); expect(JSON.stringify(client.account)).not.toContain('synthetic-session');
     expect((await readFile(file)).toString()).not.toContain('ephemeral-password');

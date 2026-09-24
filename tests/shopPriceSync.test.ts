@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createInventory, submitBarcode, updateShop } from '../src/shared/inventoryLogic';
 import type { InventoryFile, StockRecord } from '../src/shared/types';
 import { CloudError, inventoryHash, SyncEngine, type SyncAdapter, type SyncJournal } from '../src/main/cloudSync';
+import { CloudClient } from '../src/main/cloudClient';
+import type { TokenVault } from '../src/main/cloudStore';
 import { prepareShopPrices, shopPrice, type ShopProduct, type ShopPriceTransport } from '../src/main/shopPriceSync';
 
 function harness() {
@@ -202,7 +204,45 @@ describe('registered shop price synchronization', () => {
     await h.engine.run();
     expect(h.persisted.pending).toBeNull(); expect(h.persisted.shopPricePending).toHaveLength(1);
     expect(h.persisted.conflict).toBe(false); expect(h.states.at(-1)).toBe('error');
-    expect(h.messages.at(-1)).toContain(status === 403 ? '权限' : status === 404 ? '已删除' : '待发价格');
+    expect(h.messages.at(-1)).toContain(status === 403 ? '服务器拒绝' : status === 404 ? '已删除' : '待发价格');
+    expect(h.messages.at(-1)).not.toContain('product failure');
+  });
+
+  it.each([
+    { payload: { error: 'REQUEST_VERIFICATION_FAILED', message: 'never-echo-upstream-secret' }, diagnostic: '写入来源或会话校验' },
+    { payload: { error: 'PERMISSION_DENIED', message: 'never-echo-upstream-secret' }, diagnostic: '缺少此操作所需的管理权限' },
+    { payload: { error: 'PRODUCT_REQUEST_FAILED', message: '当前账号没有定价管理权限，可以编辑名称、图片和库存。' }, diagnostic: '没有定价管理权限' },
+    { payload: { error: 'UNKNOWN', message: 'never-echo-upstream-secret' }, diagnostic: '服务器拒绝了此操作（HTTP 403）' },
+  ])('preserves the client 403 diagnostic through SyncEngine reports and the durable price queue: $diagnostic', async scenario => {
+    const h = harness(); h.edit();
+    const vault = { available: false, load: async () => null, save: async () => undefined, clear: async () => undefined } as unknown as TokenVault;
+    const client = new CloudClient(vault, async () => new Response(JSON.stringify(scenario.payload), { status: 403, headers: { 'content-type': 'application/json' } }));
+    client.account = { id: 'synthetic-account', username: 'synthetic', displayName: 'Synthetic', mustChangePassword: false, permissions: ['products.manage', 'pricing.manage'] };
+    h.transport.saveProductPrice = vi.fn((id, body) => client.saveProductPrice(id, body));
+    await h.engine.run();
+    expect(h.states.at(-1)).toBe('error');
+    expect(h.messages.at(-1)).toContain('库存已同步'); expect(h.messages.at(-1)).toContain(scenario.diagnostic);
+    expect(h.messages.at(-1)).toContain('待发价格已保留'); expect(h.messages.at(-1)).not.toContain('never-echo-upstream-secret');
+    if (scenario.payload.error === 'REQUEST_VERIFICATION_FAILED') expect(h.messages.at(-1)).not.toContain('没有商店商品或价格管理权限');
+    expect(h.persisted.pending).toBeNull(); expect(h.persisted.conflict).toBe(false); expect(h.persisted.shopPriceConflict).toBe(false);
+    expect(h.persisted.shopPricePending).toHaveLength(1);
+    const pendingBody = h.persisted.shopPricePending![0]!.request!.body;
+    expect(pendingBody).toBe(vi.mocked(h.transport.saveProductPrice).mock.calls[0]![1]);
+    expect(h.transport.saveProductPrice).toHaveBeenCalledOnce(); expect(h.product.content.currentCents).toBe(1000);
+  });
+
+  it.each([
+    new CloudError('never-echo-unknown-cloud-error', 403),
+    new Error('<html>never-echo-unknown-transport-error</html>'),
+    { status: 403, message: 'never-echo-non-CloudError-object' },
+  ])('uses fixed fallback for unrecognized or untyped transport errors %#', async error => {
+    const h = harness(); h.edit(); h.transport.saveProductPrice = vi.fn(async () => { throw error; });
+    await h.engine.run();
+    expect(h.messages.at(-1)).toBe(error instanceof CloudError
+      ? '库存已同步，商店价格请求被服务器拒绝（HTTP 403）。 待发价格已保留。'
+      : '库存已同步，商店价格同步中断，待发价格已保留，请重试。');
+    expect(h.persisted.shopPricePending?.[0]?.request).toBeDefined(); expect(h.persisted.conflict).toBe(false);
+    expect(h.states.at(-1)).toBe('error'); expect(h.transport.saveProductPrice).toHaveBeenCalledOnce();
   });
 
   it('keeps website price conflicts separate and requires an explicit new-key rebase', async () => {

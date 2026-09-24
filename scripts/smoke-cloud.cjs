@@ -29,6 +29,7 @@ global.fetch = async (target, options={}) => {
     headers.append('set-cookie','__Host-amane_admin_csrf=synthetic-csrf; Path=/; Secure');
     return new Response(JSON.stringify({authenticated:true,account}),{headers});
   }
+  if (options.method && options.method !== 'GET' && (options.headers.Origin !== 'https://console.amaneacg.space' || options.headers['X-CSRF-Token'] !== 'synthetic-csrf')) return json({error:'REQUEST_VERIFICATION_FAILED'},403);
   if (route === '/api/auth/logout') return json({ok:true});
   if (route === '/api/auth/session') return json({authenticated:true,account});
   if (route === '/api/stock-books' && (!options.method || options.method === 'GET')) return json({items:[...books.values()].map(r=>({id:r.id,name:r.inventory.inventoryName,version:r.version,itemCount:1,quantityOnHand:3,updatedAt:stamp}))});

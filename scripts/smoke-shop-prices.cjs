@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..'), target = path.resolve(process.argv[2] || root);
 app.disableHardwareAcceleration();
 const stamp = '2026-09-23T12:00:00.000Z', id = randomUUID(), barcode = 'SYNTHETIC-PRICE-01';
-const account = {id:randomUUID(),username:'price-qa',displayName:'隔离价格验收',permissions:['content.manage','products.manage','pricing.manage'],mustChangePassword:false};
+const account = {id:randomUUID(),username:'price-qa',displayName:'隔离价格验收',permissions:['inventory.manage','products.manage','pricing.manage'],mustChangePassword:false};
 const item = {barcode,sortIndex:0,nickname:'合成商品',lookupName:'Synthetic item',brand:'',category:'',imageUrl:'',priceAmount:3,salePriceAmount:10,priceCurrency:'CAD',lookupSource:'none',lookupConfidence:0,quantityOnHand:5,totalIn:5,totalOut:0,firstInAt:stamp,lastInAt:stamp,lastOutAt:null,lookupStatus:'not_found',lookupUpdatedAt:stamp,createdAt:stamp,updatedAt:stamp,listed:false,shop:{imageId:null,originalCents:1200,currentCents:1000,discountBps:1667,priceSource:'current'}};
 const inventory = {schemaVersion:7,inventoryId:id,inventoryName:'价格同步验收',createdAt:stamp,updatedAt:stamp,items:{[barcode]:item},transactions:[]};
 let book = null, product = {id:randomUUID(),version:7,content:{name:'商店独立名称',imageId:randomUUID(),currency:'CAD',originalCents:1200,currentCents:1000,discountBps:1667,priceSource:'current'},stock:5,listed:true,sourceBookId:id,sourceBarcode:barcode,shopRegistered:true,deletedAt:null,createdAt:stamp,updatedAt:stamp,categoryId:randomUUID(),categoryName:'保留分类'};
@@ -28,6 +28,7 @@ global.fetch = async (target, options={}) => {
     return new Response(JSON.stringify({authenticated:true,account}),{headers});
   }
   if (url.pathname === '/api/auth/session') return json({authenticated:true,account});
+  if (method !== 'GET' && (options.headers.Origin !== 'https://console.amaneacg.space' || options.headers['X-CSRF-Token'] !== 'qa-csrf')) return json({error:'REQUEST_VERIFICATION_FAILED'},403);
   if (url.pathname === '/api/auth/logout') return json({ok:true});
   if (url.pathname === '/api/products') return json({items:[product]});
   if (url.pathname === `/api/products/${product.id}`) {
@@ -110,7 +111,7 @@ const timeout=setTimeout(()=>{process.stderr.write('NATIVE_PRICE_QA_TIMEOUT\n');
   assert.equal(final.inventory.items[barcode].priceAmount,4); assert.equal(final.inventory.items[barcode].quantityOnHand,6);
   assert.equal((await js('window.amaneStock.cloudStatus()')).state,'synced');
   checks.push('adopt shop price without losing cost or stock');
-  const output=path.join(root,'artifacts','release-0.2.2'); await fs.mkdir(output,{recursive:true});
+  const output=path.join(root,'artifacts',`release-${require(path.join(root,'package.json')).version}`); await fs.mkdir(output,{recursive:true});
   const report={status:'PASS',target,checks,productCommits,productAttempts:productAttempts.length,stockCommits:writes.length,isolatedData:directory,realRequests:0,realInventories:0};
   await fs.writeFile(path.join(output,'native-shop-price-smoke.json'),JSON.stringify(report,null,2));
   console.log(JSON.stringify(report)); clearTimeout(timeout); window.destroy();app.exit(0);

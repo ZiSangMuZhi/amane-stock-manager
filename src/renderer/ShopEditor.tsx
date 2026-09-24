@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { InventoryDocument, InventoryItem } from '../shared/types';
+import { loadShopImage } from './shopImage';
 import { keepShopPriceDraft, receiveShopPrice, shopFromPriceDraft, shopItemIdentity, shopPriceDirty, startShopPriceEditor, type ShopPriceDraft } from './shopPriceDraft';
 
-type Props = { registered?: boolean; item: InventoryItem; onDocument: (value: InventoryDocument) => void };
+type Props = { registered?: boolean; shopActionsEnabled?: boolean; serverSupported?: boolean; disabled?: boolean; item: InventoryItem; onDocument: (value: InventoryDocument) => void };
 export function ShopEditor(props: Props): JSX.Element {
   return <ShopEditorSession key={shopItemIdentity(props.item)} {...props} />;
 }
-function ShopEditorSession({ item, onDocument, registered = false }: Props): JSX.Element {
+function ShopEditorSession({ item, onDocument, registered = false, shopActionsEnabled = false, serverSupported = false, disabled = false }: Props): JSX.Element {
   const identity = shopItemIdentity(item), latest = useRef(item); latest.current = item;
   const [stored, setEditor] = useState(() => startShopPriceEditor(identity, item.shop));
   const editor = receiveShopPrice(stored, identity, item.shop);
@@ -16,12 +17,22 @@ function ShopEditorSession({ item, onDocument, registered = false }: Props): JSX
   const active = useRef(true), locked = useRef(false), container = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<{ dataUrl: string; width: number; height: number } | null>(null), [ownedUrl, setOwnedUrl] = useState('');
   const [zoom, setZoom] = useState(1), [x, setX] = useState(.5), [y, setY] = useState(.5);
+  const [imageDraft, setImageDraft] = useState({ base: item.shop.imageId, value: item.shop.imageId, conflict: false });
+  const imageDirty = imageDraft.value !== imageDraft.base;
+  const imageEditing = useRef(false); imageEditing.current = imageDirty || !!selected;
+  const imageLocked = busy || disabled || !shopActionsEnabled;
+  const firstListingNeedsPriceSave = !registered && !item.listed && dirty;
+  useEffect(() => {
+    setImageDraft(current => current.value === current.base && !imageEditing.current
+      ? { base: item.shop.imageId, value: item.shop.imageId, conflict: false }
+      : { ...current, conflict: item.shop.imageId !== current.base });
+  }, [item.shop.imageId]);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   useEffect(() => {
     let current = true; setOwnedUrl('');
-    if (item.shop.imageId) void window.amaneStock.getShopImage(item.shop.imageId).then(url => { if (current) setOwnedUrl(url); }).catch(() => undefined);
+    if (imageDraft.value) void loadShopImage(imageDraft.value).then(url => { if (current) setOwnedUrl(url); }).catch(() => undefined);
     return () => { current = false; };
-  }, [item.shop.imageId]);
+  }, [imageDraft.value]);
   let validation = '';
   try { shopFromPriceDraft(editor.draft, item.shop); } catch (cause) { validation = cause instanceof Error ? cause.message : String(cause); }
   function edit(patch: Partial<ShopPriceDraft>): void { setEditor(current => ({ ...current, draft: { ...current.draft, ...patch } })); setError(''); setNotice(''); }
@@ -32,10 +43,10 @@ function ShopEditorSession({ item, onDocument, registered = false }: Props): JSX
     onDocument(document); setNotice(message);
   }
   async function action(work: () => Promise<void>): Promise<void> {
-    if (locked.current) return;
+    if (locked.current || disabled) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     const scrollY = window.scrollY, card = container.current?.closest('[data-item-barcode]'), top = card?.getBoundingClientRect().top;
-    try { await work(); } catch (cause) { if (active.current) setError(`操作未确认成功，请核对本地记录或重试。价格草稿已保留。${cause instanceof Error ? cause.message : String(cause)}`); }
+    try { await work(); } catch (cause) { if (active.current) setError(`操作未确认成功，请核对同步状态后重试。未保存的草稿已保留。${cause instanceof Error ? cause.message : String(cause)}`); }
     finally {
       locked.current = false;
       if (active.current) {
@@ -58,12 +69,22 @@ function ShopEditorSession({ item, onDocument, registered = false }: Props): JSX
     setEditor(startShopPriceEditor(identity, saved.shop));
     accept(document, '商店价格已保存到本地，等待云同步。');
   }
+  async function saveImage(): Promise<void> {
+    if (imageLocked || imageDraft.conflict || !imageDirty || selected) return;
+    const next = await window.amaneStock.cloudShopOperation({ type: 'shop-image', barcode: item.barcode, imageId: imageDraft.value });
+    if (!active.current) return;
+    const saved = next.inventory?.items[item.barcode];
+    if (saved) setImageDraft({ base: saved.shop.imageId, value: saved.shop.imageId, conflict: false });
+    accept(next, '主图已保存到云端库存和次元商店。未保存的价格草稿未提交。');
+  }
   const width = selected ? Math.min(selected.width, selected.height) / selected.width / zoom : 1;
   const height = selected ? Math.min(selected.width, selected.height) / selected.height / zoom : 1;
   const crop = { x: (1 - width) * x, y: (1 - height) * y, width, height };
   return <div ref={container} className="shop-editor" onDragStart={e => e.stopPropagation()}>
-    <label className="shop-listing"><input type="checkbox" checked={item.listed} disabled={busy || registered} onChange={e => { const listed = e.target.checked; void action(async () => accept(await window.amaneStock.updateListing(item.barcode, listed), '上架设置已保存到本地，等待云同步。')); }} />商店上架 <small>{registered ? '在网页商店管理上架状态' : item.listed ? '连接后公开展示' : '不在商店展示'}</small></label>
-    {registered && <p className="shop-price-notice">此商品已在网页商店注册。图片与上架状态请在网页商店管理；此处仍可修改 CAD 定价。</p>}
+    <label className="shop-listing"><input type="checkbox" checked={item.listed} disabled={imageLocked || firstListingNeedsPriceSave} onChange={e => { if (firstListingNeedsPriceSave) return; const listed = e.target.checked; void action(async () => accept(await window.amaneStock.cloudShopOperation({ type: 'shop-listing-batch', barcodes: [item.barcode], listed }), listed ? '已上架到次元商店。' : '已从次元商店下架。')); }} />商店上架 <small>{item.listed ? '公开展示中' : '不在商店展示'}</small></label>
+    {firstListingNeedsPriceSave && <p className="shop-price-notice">请先保存或放弃价格修改，再首次上架注册。</p>}
+    {registered && <p className="shop-price-notice">已在网页商店注册。主图、上架状态和 CAD 定价可在此管理，库存数量继续同步。</p>}
+    {!shopActionsEnabled && <p className="shop-price-notice">{!serverSupported ? '连接后等待服务端能力确认；Mac 服务端升级后可保存主图与批量上架。CAD 价格同步仍可使用。' : '主图与上架操作需要登录、连接当前库存并具备库存和商品管理权限；请先处理待同步请求或冲突。'}</p>}
     <details><summary>商店 CAD 定价 · ${(item.shop.currentCents / 100).toFixed(2)} {item.shop.imageId ? '· 已选图片' : ''}{editor.conflict ? ' · 外部价格变更待处理' : dirty ? ' · 有未保存修改' : ''}</summary>
       <p>商店固定使用 CAD；卡片的 CAD 售价与此处现价同步，进价独立。非 CAD 的卡片售价不参与同步。</p>
       {editor.conflict && <div className="shop-price-conflict" role="alert"><strong>本地记录中的商店价格已变化</strong><p>未保存的输入仍保留。当前记录：原价 CAD {(item.shop.originalCents / 100).toFixed(2)}，现价 CAD {(item.shop.currentCents / 100).toFixed(2)}，减价 {(item.shop.discountBps / 100).toFixed(2)}%。请选择如何处理后再保存。</p><button type="button" disabled={busy} onClick={() => { setEditor(startShopPriceEditor(identity, latest.current.shop)); setError(''); setNotice('已重新载入本地记录中的价格。'); }}>重新载入价格</button><button type="button" disabled={busy} onClick={() => { setEditor(keepShopPriceDraft(editorRef.current, latest.current.shop)); setNotice('草稿已保留，尚未保存。再次保存将替换本地记录中的价格。'); }}>保留草稿继续编辑</button></div>}
@@ -76,17 +97,19 @@ function ShopEditorSession({ item, onDocument, registered = false }: Props): JSX
       {dirty && validation && <p className="shop-price-validation" role="status">{validation}</p>}
       {dirty && !editor.conflict && <button type="button" disabled={busy} onClick={() => { setEditor(startShopPriceEditor(identity, latest.current.shop)); setError(''); setNotice('未保存的价格修改已放弃。'); }}>放弃价格修改</button>}
       {ownedUrl && <img className="shop-owned-thumb" src={ownedUrl} alt="已上传的商店图片" />}
-      {!registered && <button type="button" disabled={busy} onClick={() => void action(async () => { const chosen = await window.amaneStock.chooseShopImage(); if (active.current) { setSelected(chosen); setZoom(1); setX(.5); setY(.5); } })}>选择并裁切自有图片</button>}
-      {!registered && item.shop.imageId && <button type="button" disabled={busy} onClick={() => void action(async () => accept(await window.amaneStock.updateShop(item.barcode, { ...latest.current.shop, imageId: null }), '图片移除已保存到本地，等待云同步。未保存的价格草稿未提交。'))}>移除商店图片</button>}
-      {!registered && selected && <div className="shop-crop">
+      <button type="button" disabled={imageLocked} onClick={() => void action(async () => { const chosen = await window.amaneStock.chooseShopImage(); if (active.current && chosen) { setSelected(chosen); setZoom(1); setX(.5); setY(.5); } })}>选择并裁切自有图片</button>
+      {imageDraft.value && <button type="button" disabled={imageLocked} onClick={() => { setImageDraft(current => ({ ...current, value: null })); setSelected(null); setNotice('移除尚未保存，请点击保存主图。'); }}>移除商店图片</button>}
+      {imageDraft.conflict && <div className="shop-price-conflict" role="alert"><strong>云端主图已变化，当前图片草稿仍保留。</strong><button type="button" disabled={imageLocked} onClick={() => { setImageDraft({ base: item.shop.imageId, value: item.shop.imageId, conflict: false }); setSelected(null); }}>重新载入主图</button><button type="button" disabled={imageLocked} onClick={() => setImageDraft(current => ({ ...current, base: item.shop.imageId, conflict: false }))}>保留图片草稿</button></div>}
+      {selected && <div className="shop-crop">
         <div className="shop-crop-preview"><img draggable={false} src={selected.dataUrl} alt="上传裁切预览" style={{ width: `${100 / width}%`, height: `${100 / height}%`, left: `${-crop.x / width * 100}%`, top: `${-crop.y / height * 100}%` }} /></div>
         <label>缩放<input type="range" min="1" max="4" step="0.01" disabled={busy} value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label>
         <label>横向位置<input type="range" min="0" max="1" step="0.01" disabled={busy} value={x} onChange={e => setX(Number(e.target.value))} /></label>
         <label>纵向位置<input type="range" min="0" max="1" step="0.01" disabled={busy} value={y} onChange={e => setY(Number(e.target.value))} /></label>
-        <small>仅上传你拥有或获准使用的图片。此按钮会将裁切图发送到管理员服务，需要先登录；不会提交未保存的价格。</small>
-        <button type="button" disabled={busy} onClick={() => void action(async () => { const document = await window.amaneStock.uploadShopImage(item.barcode, selected.dataUrl, crop); if (active.current) { accept(document, '图片关联已保存到本地，等待云同步。未保存的价格草稿未提交。'); setSelected(null); } })}>裁切并上传图片</button>
+        <small>上传裁切图后，点击保存主图才会应用到库存和商店；不会提交未保存的价格。</small>
+        <button type="button" disabled={imageLocked} onClick={() => void action(async () => { const imageId = await window.amaneStock.uploadShopImageAsset(selected.dataUrl, crop); if (active.current) { setImageDraft(current => ({ ...current, value: imageId })); setNotice('裁切图已上传，点击保存主图以应用到库存和商店。'); setSelected(null); } })}>裁切并上传图片</button>
         <button type="button" disabled={busy} onClick={() => setSelected(null)}>取消</button>
       </div>}
+      <div className="shop-image-actions"><button type="button" disabled={imageLocked || !imageDirty || imageDraft.conflict || !!selected} onClick={() => void action(saveImage)}>保存主图</button>{(imageDirty || selected) && <button type="button" disabled={busy || disabled} onClick={() => { setImageDraft({ base: item.shop.imageId, value: item.shop.imageId, conflict: false }); setSelected(null); setNotice('图片修改已放弃。'); }}>放弃图片修改</button>}</div>
       {notice && <p className="shop-price-notice" role="status">{notice}</p>}
       {error && <p className="cloud-error" role="alert">{error}</p>}
     </details>

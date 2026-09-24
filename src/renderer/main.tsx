@@ -1,5 +1,6 @@
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { loadShopImage } from './shopImage';
 import {
   ArrowDownAZ,
   ArrowDownWideNarrow,
@@ -58,6 +59,7 @@ type SortPreset = 'name' | 'purchasePrice' | 'salePrice' | 'stock' | 'totalIn' |
 type ValueByCurrency = Partial<Record<CurrencyCode, number>>;
 type ActionOptions = { focusBarcode?: boolean; preserveScroll?: boolean; anchorBarcode?: string };
 type ScrollSnapshot = { scrollY: number; anchorBarcode?: string; anchorTop?: number };
+type ShopSelection = { scope: string; items: { barcode: string; createdAt: string }[] };
 
 const themeStorageKey = 'amane-theme-mode';
 const emptyDocument: InventoryDocument = { filePath: null, fileName: '', inventory: null };
@@ -82,6 +84,10 @@ function App(): JSX.Element {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<string, string>>({});
   const [storedPrices, setPriceEditors] = useState<Record<string, CardPriceEditor>>({});
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const [bulkMode, setBulkMode] = useState(false), [shopSelection, setShopSelection] = useState<ShopSelection>({ scope: '', items: [] });
+  const [bulkListing, setBulkListing] = useState<boolean | null>(null);
+  const bulkConfirmation = useRef<ShopSelection | null>(null), cloudStatusRef = useRef<CloudStatus | null>(null);
+  const batchLock = useRef(false);
   const priceWriteLock = useRef(false), documentRef = useRef(document); documentRef.current = document;
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<ViewMode>('standard');
@@ -104,7 +110,7 @@ function App(): JSX.Element {
   const registeredBarcodes = cloudStatus?.inventoryId === inventory?.inventoryId ? cloudStatus?.registeredBarcodes ?? [] : [];
   useEffect(() => {
     let active = true, version = 0; setCloudStatus(null);
-    const accept = (status: CloudStatus) => { if (active && status.inventoryId === inventory?.inventoryId) setCloudStatus(status); };
+    const accept = (status: CloudStatus) => { if (active && (!status.inventoryId || status.inventoryId === inventory?.inventoryId)) { cloudStatusRef.current = status; setCloudStatus(status); } };
     const stop = window.amaneStock.onCloudStatus(status => { version++; accept(status); });
     const requestVersion = version;
     void window.amaneStock.cloudStatus().then(status => { if (version === requestVersion) accept(status); }).catch(() => undefined);
@@ -112,6 +118,53 @@ function App(): JSX.Element {
   }, [document.filePath, inventory?.inventoryId]);
   const scopedItems = useMemo(() => filterByInventoryScope(orderedItems, inventoryScope), [orderedItems, inventoryScope]);
   const visibleItems = useMemo(() => filterItems(scopedItems, searchQuery), [scopedItems, searchQuery]);
+  const visibleKeys = JSON.stringify(visibleItems.map(item => [item.barcode, item.createdAt]));
+  const selectionScope = JSON.stringify([priceScope, cloudStatus?.account?.id ?? null]);
+  const selectedShopItems = shopSelection.scope === selectionScope ? shopSelection.items.filter(selected =>
+    visibleItems.some(item => item.barcode === selected.barcode && item.createdAt === selected.createdAt)).map(item => item.barcode) : [];
+  useEffect(() => { setBulkListing(null); bulkConfirmation.current = null; setBulkMode(false); }, [selectionScope]);
+  useEffect(() => {
+    setShopSelection(current => ({ scope: selectionScope, items: current.scope === selectionScope ? current.items.filter(selected =>
+      visibleItems.some(item => item.barcode === selected.barcode && item.createdAt === selected.createdAt)) : [] }));
+    setBulkListing(null); bulkConfirmation.current = null;
+  }, [visibleKeys, selectionScope]);
+  function selectShopItems(barcodes: string[]): void {
+    setShopSelection({ scope: selectionScope, items: barcodes.map(barcode => ({ barcode, createdAt: inventory!.items[barcode]!.createdAt })) });
+  }
+  function confirmShopListing(listed: boolean): void {
+    bulkConfirmation.current = { scope: selectionScope, items: selectedShopItems.map(barcode => ({ barcode, createdAt: inventory!.items[barcode]!.createdAt })) };
+    setBulkListing(listed);
+  }
+  const permissions = cloudStatus?.account?.permissions ?? [];
+  const shopActionsEnabled = !!cloudStatus?.connected && !!cloudStatus.account &&
+    cloudStatus.shopOperationsSupported === true &&
+    permissions.some(permission => permission === 'products.manage' || permission === 'content.manage') &&
+    permissions.some(permission => permission === 'inventory.manage' || permission === 'content.manage') &&
+    !cloudStatus.shopOperationPending && !cloudStatus.shopPriceConflict &&
+    !['conflict', 'expired', 'uploading', 'downloading'].includes(cloudStatus.state);
+  function selectionButton(item: InventoryItem): JSX.Element | null {
+    if (!bulkMode) return null;
+    const selected = selectedShopItems.includes(item.barcode);
+    return <button className={`shop-select-item ${selected ? 'selected' : ''}`} type="button" aria-pressed={selected} aria-label={`${selected ? '取消选择' : '选择'} ${item.nickname || item.lookupName || item.barcode}`} disabled={busy || bulkListing !== null} onDragStart={event => event.preventDefault()} onClick={() => selectShopItems(selected ? selectedShopItems.filter(value => value !== item.barcode) : selectedShopItems.length >= 200 ? selectedShopItems : [...selectedShopItems, item.barcode])}><CheckCircle2 size={15} />{selected ? '已选择' : '选择商品'}</button>;
+  }
+  async function submitShopBatch(): Promise<void> {
+    if (batchLock.current || busy || bulkListing === null || !shopActionsEnabled || !selectedShopItems.length || selectedShopItems.length > 200) return;
+    const confirmation = bulkConfirmation.current;
+    const currentScope = () => JSON.stringify([priceDocumentIdentity(documentRef.current), cloudStatusRef.current?.account?.id ?? null]);
+    if (!confirmation || confirmation.scope !== currentScope() || confirmation.items.length !== selectedShopItems.length ||
+        confirmation.items.some(item => !selectedShopItems.includes(item.barcode) || documentRef.current.inventory?.items[item.barcode]?.createdAt !== item.createdAt)) {
+      setBulkListing(null); bulkConfirmation.current = null; return;
+    }
+    const barcodes = confirmation.items.map(item => item.barcode), listed = bulkListing, identity = confirmation.scope;
+    batchLock.current = true;
+    try {
+      await runAction(() => window.amaneStock.cloudShopOperation({ type: 'shop-listing-batch', barcodes, listed }), next => {
+        if (currentScope() !== identity) return;
+        setDocument(next); selectShopItems([]); setBulkListing(null); bulkConfirmation.current = null;
+        setNotice({ type: 'success', text: `${barcodes.length} 件商品已${listed ? '上架到' : '从'}次元商店${listed ? '。' : '下架。'}` });
+      }, { focusBarcode: false, preserveScroll: true });
+    } finally { batchLock.current = false; }
+  }
   const totals = useMemo(() => {
     return scopedItems.reduce(
       (acc, item) => {
@@ -168,6 +221,8 @@ function App(): JSX.Element {
     window.amaneStock.getCurrentInventory().then(setDocument).catch(showError);
     window.amaneStock.getVersion().then(setVersion).catch(() => setVersion('0.1.16'));
     return window.amaneStock.onInventoryChanged((next) => {
+      // IPC events may arrive before React commits its next render; confirmation checks use this live identity.
+      documentRef.current = next;
       setDocument(next);
     });
   }, []);
@@ -780,6 +835,16 @@ function App(): JSX.Element {
           </section>
         )}
 
+        {inventory && orderedItems.length > 0 && <section className="shop-batch-bar" aria-label="批量商店管理">
+          <div className="shop-batch-actions">
+            <button type="button" disabled={busy} aria-pressed={bulkMode} onClick={() => { setBulkMode(!bulkMode); selectShopItems([]); setBulkListing(null); }}>{bulkMode ? '结束批量选择' : '批量上架 / 下架'}</button>
+            {bulkMode && <><span role="status">已选 {selectedShopItems.length} / 200 件 · 仅当前筛选结果</span><button type="button" disabled={busy || bulkListing !== null || visibleItems.length === 0} onClick={() => selectShopItems(visibleItems.slice(0, 200).map(item => item.barcode))}>{visibleItems.length > 200 ? '选择当前前 200 件' : '全选当前结果'}</button><button type="button" disabled={busy || !selectedShopItems.length || bulkListing !== null} onClick={() => selectShopItems([])}>清空选择</button><button type="button" disabled={busy || !shopActionsEnabled || !selectedShopItems.length || bulkListing !== null} onClick={() => confirmShopListing(true)}>批量上架</button><button type="button" disabled={busy || !shopActionsEnabled || !selectedShopItems.length || bulkListing !== null} onClick={() => confirmShopListing(false)}>批量下架</button></>}
+          </div>
+          {bulkMode && !shopActionsEnabled && <p>{cloudStatus?.connected && cloudStatus.shopOperationsSupported !== true ? '等待 Mac 服务端升级后启用批量上架与主图保存。原有同步和冲突处理仍可使用。' : '请登录并连接当前库存，确认具备库存和商品管理权限，并先处理待同步请求或冲突。'}</p>}
+          {bulkMode && selectedShopItems.length === 200 && <p>单次最多选择 200 件，剩余商品可在完成后继续操作。</p>}
+          {bulkListing !== null && <div className="shop-batch-confirm" role="group" aria-label="确认批量商店操作"><strong>确认{bulkListing ? '上架' : '下架'}已选的 {selectedShopItems.length} 件商品？</strong><p>{bulkListing ? '未注册的商品会同时在商店注册，保留已有分类和定价；上架后访客可以看到并购买。' : '商品将不再公开展示，库存、图片和订单记录仍保留。'}本次仅操作当前筛选结果中已选择的商品。</p><div className="shop-batch-actions"><button type="button" disabled={busy} onClick={() => setBulkListing(null)}>取消批量操作</button><button type="button" className="shop-batch-submit" disabled={busy || !shopActionsEnabled} onClick={() => void submitShopBatch()}>{busy ? '正在同步…' : `确认批量${bulkListing ? '上架' : '下架'}`}</button></div></div>}
+        </section>}
+
         {inventory && (
           <section className={`inventory-grid ${viewMode === 'compact' ? 'compact-grid' : ''}`} aria-label="库存商品">
             {orderedItems.length === 0 ? (
@@ -796,7 +861,7 @@ function App(): JSX.Element {
               visibleItems.map((item) =>
                 viewMode === 'compact' ? (
                   <article
-                    className={`compact-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                    className={`compact-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''} ${bulkMode && selectedShopItems.includes(item.barcode) ? 'shop-item-selected' : ''}`}
                     key={item.barcode}
                     data-item-barcode={item.barcode}
                     draggable={!busy}
@@ -805,6 +870,7 @@ function App(): JSX.Element {
                     onDrop={(event) => handleDrop(event, item)}
                     onDragEnd={handleDragEnd}
                   >
+                    {selectionButton(item)}
                     <span className="drag-handle" title="拖动排序">
                       <GripVertical size={16} />
                     </span>
@@ -833,11 +899,11 @@ function App(): JSX.Element {
                         <Trash2 size={14} />
                       </button>
                     </div>
-                    <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} onDocument={setDocument} />
+                    <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} shopActionsEnabled={shopActionsEnabled} serverSupported={cloudStatus?.shopOperationsSupported === true} disabled={busy} onDocument={setDocument} />
                   </article>
                 ) : (
                 <article
-                  className={`item-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''}`}
+                  className={`item-card ${isPrimaryQuantityEmpty(item, inventoryScope) ? 'empty' : ''} ${draggingBarcode === item.barcode ? 'dragging' : ''} ${bulkMode && selectedShopItems.includes(item.barcode) ? 'shop-item-selected' : ''}`}
                   key={item.barcode}
                   data-item-barcode={item.barcode}
                   draggable={!busy}
@@ -846,6 +912,7 @@ function App(): JSX.Element {
                   onDrop={(event) => handleDrop(event, item)}
                   onDragEnd={handleDragEnd}
                 >
+                  {selectionButton(item)}
                   <div className="item-head">
                     <span className="drag-handle" title="拖动排序">
                       <GripVertical size={17} />
@@ -865,7 +932,7 @@ function App(): JSX.Element {
                     <code>{item.barcode}</code>
                   </div>
 
-                  <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} onDocument={setDocument} />
+                  <ShopEditor key={`${priceScope}:${item.barcode}:${item.createdAt}`} item={item} registered={registeredBarcodes.includes(item.barcode)} shopActionsEnabled={shopActionsEnabled} serverSupported={cloudStatus?.shopOperationsSupported === true} disabled={busy} onDocument={setDocument} />
 
                   <div className="item-edit-row">
                     <label className="nickname-field">
@@ -1097,10 +1164,17 @@ function Metric({ label, value, icon }: { label: string; value: number | string;
 }
 
 function ProductThumb({ item }: { item: InventoryItem }): JSX.Element {
-  if (item.imageUrl) {
+  const [owned, setOwned] = useState('');
+  useEffect(() => {
+    let active = true; setOwned('');
+    if (item.shop.imageId) void loadShopImage(item.shop.imageId).then(url => { if (active) setOwned(url); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [item.shop.imageId]);
+  const imageUrl = owned || item.imageUrl;
+  if (imageUrl) {
     return (
       <div className={`product-thumb ${item.quantityOnHand === 0 ? 'zero' : 'ok'}`}>
-        <img src={item.imageUrl} alt="" loading="lazy" />
+        <img src={imageUrl} alt="" loading="lazy" />
       </div>
     );
   }

@@ -1,5 +1,5 @@
 import { CloudAccount, StockRecord, StockSummary } from '../shared/types';
-import { CloudError } from './cloudSync';
+import { checkedShopOperation, CloudError } from './cloudSync';
 import { TokenVault } from './cloudStore';
 import { migrateInventory } from './fileStore';
 import type { ShopProduct } from './shopPriceSync';
@@ -50,6 +50,8 @@ function checkedProduct(value: unknown, expectedId?: string): ShopProduct {
 function allowedRoute(method: string, route: string): boolean {
   if (method === 'GET' && ['/api/auth/session', '/api/stock-books', '/api/products'].includes(route)) return true;
   if (method === 'POST' && ['/api/auth/login', '/api/auth/logout', '/api/auth/change-password', '/api/stock-books', '/api/products/media'].includes(route)) return true;
+  const operation = /^\/api\/stock-books\/([^/]+)\/operations$/.exec(route);
+  if (method === 'POST' && operation && uuid(operation[1])) return true;
   const match = /^\/api\/(stock-books|products|products\/media)\/([^/]+)$/.exec(route);
   return !!match && uuid(match[2]) && (method === 'GET' || (method === 'PUT' && match[1] !== 'products/media'));
 }
@@ -122,6 +124,11 @@ export class CloudClient {
       throw new CloudError(write ? '此账号没有商店商品及价格管理权限。' : '此账号没有商店商品管理权限。', 403);
     }
   }
+  requireShopOperationAccount(): CloudAccount {
+    const account = this.requireAccount();
+    this.requireProductAccount();
+    return account;
+  }
   async products(): Promise<ShopProduct[]> {
     this.requireProductAccount();
     const payload = await this.productRequest('GET', '/api/products');
@@ -160,12 +167,26 @@ export class CloudClient {
     return record;
   }
   async uploadImage(dataUrl: string, crop: { x: number; y: number; width: number; height: number }): Promise<string> {
-    this.requireAccount();
+    this.requireShopOperationAccount();
     if (typeof dataUrl !== 'string' || dataUrl.length > 12 * 1024 * 1024 || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(dataUrl) ||
       !crop || !Object.values(crop).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1) ||
       crop.width <= 0 || crop.height <= 0 || crop.x + crop.width > 1.00001 || crop.y + crop.height > 1.00001) throw new CloudError('请选择有效图片及裁切范围。', 400);
     const image = await this.request<{id: string}>('POST', '/api/products/media', JSON.stringify({ base64: dataUrl.split(',')[1], crop }));
     return checkedId(image.id);
+  }
+  async stockOperation(id: string, body: string): Promise<StockRecord> {
+    this.requireShopOperationAccount(); checkedId(id);
+    if (typeof body !== 'string' || Buffer.byteLength(body) > 2 * 1024 * 1024) throw new CloudError('商店操作请求无效或超过大小限制。', 400, true);
+    let value: unknown;
+    try { value = JSON.parse(body); } catch { throw new CloudError('商店操作请求无效。', 400, true); }
+    if (!object(value) || Object.keys(value).some(key => !['version', 'requestKey', 'operation'].includes(key)) ||
+        !integer(value.version, 1) || !uuid(value.requestKey)) throw new CloudError('商店操作请求无效。', 400, true);
+    checkedShopOperation(value.operation);
+    const record = await this.request<StockRecord>('POST', `/api/stock-books/${id}/operations`, body);
+    if (!record || record.inventory?.schemaVersion !== 7 || record.id !== id || record.inventory.inventoryId !== id ||
+        !integer(record.version, 1)) throw new CloudError('云端库存响应无效。', 502);
+    record.inventory = migrateInventory(record.inventory, '云端库存');
+    return record;
   }
   async image(id: string): Promise<string> {
     this.requireAccount();

@@ -1,5 +1,5 @@
 /* Hidden native smoke: synthetic data, intercepted fetch, isolated userData; never touches real inventories. */
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -33,13 +33,22 @@ global.fetch = async (target, options={}) => {
   if (route === '/api/auth/logout') return json({ok:true});
   if (route === '/api/auth/session') return json({authenticated:true,account});
   if (route === '/api/stock-books' && (!options.method || options.method === 'GET')) return json({items:[...books.values()].map(r=>({id:r.id,name:r.inventory.inventoryName,version:r.version,itemCount:1,quantityOnHand:3,updatedAt:stamp}))});
+  if (route === `/api/stock-books/${inventoryId}/operations`) {
+    const body=JSON.parse(options.body),previous=books.get(inventoryId);
+    if(responses.has(body.requestKey))return json(responses.get(body.requestKey));
+    if(body.version!==previous.version)return json({error:'STOCK_CONFLICT'},409);
+    assert.equal(body.operation.type,'shop-listing-batch');
+    const next=structuredClone(previous);next.version++;next.shopRegisteredBarcodes=body.operation.barcodes;
+    for(const barcode of body.operation.barcodes)next.inventory.items[barcode].listed=body.operation.listed;
+    books.set(inventoryId,next);responses.set(body.requestKey,next);return json(next);
+  }
   if (route.startsWith('/api/stock-books')) {
     if (options.body) {
       const body = JSON.parse(options.body);
       if (responses.has(body.requestKey)) return json(responses.get(body.requestKey));
       const previous = books.get(body.inventory.inventoryId);
       if (previous && (options.method === 'POST' || body.version !== previous.version)) return json({error:'VERSION_CONFLICT'},409);
-      const record = {id:body.inventory.inventoryId,version:(previous?.version||0)+1,inventory:body.inventory,updatedAt:new Date().toISOString()};
+      const record = {id:body.inventory.inventoryId,version:(previous?.version||0)+1,inventory:body.inventory,updatedAt:new Date().toISOString(),shopOperationsSupported:true};
       books.set(record.id,record);responses.set(body.requestKey,record);return json(record);
     }
     return books.has(route.split('/').at(-1)) ? json(books.get(route.split('/').at(-1))) : json({error:'NOT_FOUND'},404);
@@ -59,6 +68,7 @@ let timeout = setTimeout(()=>{process.stderr.write('NATIVE_SMOKE_TIMEOUT\n');app
   await fs.writeFile(path.join(directory,'settings.json'),JSON.stringify({lastInventoryPath:inventoryPath}));
   app.on('browser-window-created',(_event,window)=>window.hide());
   await app.whenReady();
+  session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: /^https?:/i.test(details.url) }));
   require('../out/main/index.js');
   await until(()=>BrowserWindow.getAllWindows().length>0,'window creation');
   const window=BrowserWindow.getAllWindows()[0];window.hide();

@@ -64,6 +64,61 @@ function harness() {
 }
 
 describe('registered shop price synchronization', () => {
+  it.each([false, true])('uses the latest stock version and retains managed-price protection for explicit local overwrite (website edited=%s)', async editedOnWebsite => {
+    const h = harness(); h.server.version = 5; h.journal.conflict = true; h.edit();
+    await h.adapter.save(h.journal);
+    const remoteBackup = structuredClone(h.server), productBefore = structuredClone(h.product), request = h.adapter.request;
+    h.adapter.backupRemote = vi.fn(async (_file, record) => { expect(record).toEqual(remoteBackup); });
+    h.adapter.request = vi.fn(async (...args: Parameters<SyncAdapter['request']>) => {
+      if (args[0] === 'PUT') {
+        expect(h.adapter.backupRemote).toHaveBeenCalledOnce();
+        expect(JSON.parse(args[2]!).version).toBe(5); expect(h.persisted.pending?.overwrite).toBe(true);
+        expect(h.persisted.pending?.shopPrices?.[0]).toMatchObject({ productId: h.product.id, desired: { currentCents: 750 } });
+      }
+      const result = await request(...args);
+      if (args[0] === 'PUT' && editedOnWebsite) h.product = { ...h.product, version: h.product.version + 1, content: { ...h.product.content, currentCents: 900, discountBps: 1000 } };
+      return result;
+    });
+    await h.engine.useLocal();
+    expect(h.persisted.version).toBe(6); expect(h.persisted.inventoryId).toBe(remoteBackup.id); expect(h.persisted.pending).toBeNull();
+    expect(h.server.inventory.items['123456']!.shop.currentCents).toBe(750);
+    expect(h.product.content.name).toBe(productBefore.content.name); expect(h.product.content.imageId).toBe(productBefore.content.imageId);
+    expect(h.product.content.categoryId).toBe(productBefore.content.categoryId); expect(h.product.listed).toBe(productBefore.listed);
+    if (editedOnWebsite) {
+      expect(h.product.content.currentCents).toBe(900); expect(h.transport.saveProductPrice).not.toHaveBeenCalled();
+      expect(h.persisted.shopPriceConflict).toBe(true); expect(h.persisted.shopPricePending).toHaveLength(1); expect(h.persisted.conflict).toBe(false);
+    } else {
+      expect(h.product.content.currentCents).toBe(750); expect(h.persisted.shopPricePending).toEqual([]); expect(h.states.at(-1)).toBe('synced');
+    }
+  });
+
+  it.each(['version', 'permission'] as const)('preserves the original conflict if overwrite price preparation fails (%s)', async failure => {
+    const h = harness(); h.server.version = 5; h.journal.conflict = true; h.edit();
+    await h.adapter.save(h.journal); const before = structuredClone(h.journal);
+    h.adapter.backupRemote = vi.fn(async () => undefined);
+    if (failure === 'version') h.transport.stock = vi.fn(async () => ({ ...h.server, version: 6 }));
+    else h.transport.products = vi.fn(async () => { throw new CloudError('no products permission', 403); });
+    await expect(h.engine.useLocal()).rejects.toMatchObject({ status: failure === 'version' ? 409 : 403 });
+    expect(h.persisted).toEqual(before); expect(h.journal).toEqual(before); expect(h.adapter.backupRemote).not.toHaveBeenCalled();
+    expect(vi.mocked(h.adapter.request).mock.calls.map(args => args[0])).toEqual(['GET']);
+    await h.engine.run(); expect(h.adapter.request).toHaveBeenCalledOnce(); expect(h.transport.saveProductPrice).not.toHaveBeenCalled();
+  });
+
+  it('does not create another inventory if deletion is discovered while flushing overwrite price intents', async () => {
+    const h = harness(); h.server.version = 5; h.journal.conflict = true; h.edit(); await h.adapter.save(h.journal);
+    h.adapter.backupRemote = vi.fn(async () => undefined);
+    const id = h.local.inventoryId, request = h.adapter.request; let reads = 0;
+    h.adapter.request = vi.fn(async (...args: Parameters<SyncAdapter['request']>) => {
+      if (args[0] === 'GET' && ++reads === 2) throw new CloudError('book deleted after overwrite acknowledgement', 410, false, true);
+      return request(...args);
+    });
+    await h.engine.useLocal();
+    expect(vi.mocked(h.adapter.request).mock.calls.map(args => args[0])).toEqual(['GET', 'PUT', 'GET']);
+    expect(h.local.inventoryId).toBe(id); expect(h.persisted.inventoryId).toBe(id); expect(h.persisted.replacement).toBeUndefined();
+    expect(h.persisted.conflict).toBe(true); expect(h.persisted.shopPricePending).toHaveLength(1);
+    expect(h.transport.saveProductPrice).not.toHaveBeenCalled(); expect(h.states.at(-1)).toBe('conflict');
+  });
+
   it('ordinary quantity changes never query or rewrite managed shop prices', async () => {
     const h = harness();
     h.local = submitBarcode(h.local, '123456', 'in').inventory;

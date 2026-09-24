@@ -8,15 +8,21 @@ export interface ShopFields {
   priceSource: 'discount' | 'current';
 }
 
+export type ShopOperation =
+  | { type: 'shop-listing-batch'; barcodes: string[]; listed: boolean }
+  | { type: 'shop-image'; barcode: string; imageId: string | null };
+
 export interface CloudLink { server: string; accountId: string; version: number; baseHash: string }
 export interface CloudAccount { id: string; username: string; displayName: string; mustChangePassword: boolean; permissions: string[] }
 export interface StockSummary { id: string; name: string; version: number; itemCount: number; quantityOnHand: number; updatedAt: string }
-export interface StockRecord { id: string; version: number; inventory: InventoryFile; updatedAt: string; shopRegisteredBarcodes?: string[] }
+export interface StockRecord { id: string; version: number; inventory: InventoryFile; updatedAt: string; shopRegisteredBarcodes?: string[]; shopOperationsSupported?: boolean }
 export interface CloudStatus {
   inventoryId?: string;
   registeredBarcodes?: string[];
   shopPriceConflict?: boolean;
   shopPricePendingCount?: number;
+  shopOperationPending?: boolean;
+  shopOperationsSupported?: boolean;
   state: 'local-only' | 'queued' | 'uploading' | 'downloading' | 'synced' | 'offline' | 'error' | 'expired' | 'conflict';
   message: string;
   account: CloudAccount | null;
@@ -131,13 +137,15 @@ export interface RendererApi {
   cloudConnect(): Promise<CloudStatus>;
   cloudDownload(id: string): Promise<InventoryDocument>;
   cloudRetry(): Promise<CloudStatus>;
-  cloudResolve(choice: 'use-cloud' | 'upload-new'): Promise<InventoryDocument>;
+  cloudResolve(choice: 'use-cloud' | 'use-local' | 'upload-new'): Promise<InventoryDocument>;
   cloudResolveShopPrices(choice: 'retry-local' | 'keep-shop'): Promise<InventoryDocument>;
+  cloudShopOperation(operation: ShopOperation): Promise<InventoryDocument>;
   onCloudStatus(callback: (status: CloudStatus) => void): () => void;
   updateListing(barcode: string, listed: boolean): Promise<InventoryDocument>;
   updateShop(barcode: string, shop: ShopFields): Promise<InventoryDocument>;
   chooseShopImage(): Promise<{ dataUrl: string; width: number; height: number } | null>;
   uploadShopImage(barcode: string, dataUrl: string, crop: { x: number; y: number; width: number; height: number }): Promise<InventoryDocument>;
+  uploadShopImageAsset(dataUrl: string, crop: { x: number; y: number; width: number; height: number }): Promise<string>;
   getShopImage(imageId: string): Promise<string>;
   getCurrentInventory(): Promise<InventoryDocument>;
   createInventory(): Promise<InventoryDocument>;

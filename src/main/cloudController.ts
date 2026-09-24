@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { CloudStatus, InventoryDocument, InventoryFile, StockRecord } from '../shared/types';
+import { CloudStatus, InventoryDocument, InventoryFile, ShopOperation, StockRecord } from '../shared/types';
 import { CloudClient, ADMIN_ORIGIN } from './cloudClient';
-import { CloudError, inventoryHash, samePath, SyncAdapter, SyncEngine, SyncJournal } from './cloudSync';
+import { captureShopOperation, checkedShopOperation, CloudError, inventoryHash, samePath, SyncAdapter, SyncEngine, SyncJournal } from './cloudSync';
 import { JournalStore } from './cloudStore';
 
 export interface CloudHost {
   current(): InventoryDocument;
   read(filePath: string): Promise<InventoryFile | null>;
   change: SyncAdapter['change'];
+  backupRemote?: SyncAdapter['backupRemote'];
   download(record: StockRecord): Promise<InventoryDocument>;
   emit(status: CloudStatus): void;
 }
@@ -25,7 +26,8 @@ export class CloudController {
     return { ...this.status, account: this.client.account, secureStorage: this.client.secureStorage, connected: Boolean(this.engine),
       inventoryId: journal?.inventoryId, registeredBarcodes: journal?.registeredBarcodes,
       shopPriceConflict: journal?.shopPriceConflict === true, shopPricePendingCount: journal?.shopPricePending?.length ?? 0,
-      pending: Boolean(journal?.pending || journal?.shopPricePending?.length) || this.status.state === 'queued', lastSuccess: journal?.lastSuccess ?? null };
+      shopOperationPending: Boolean(journal?.shopOperationPending), shopOperationsSupported: journal?.shopOperationsSupported === true,
+      pending: Boolean(journal?.pending || journal?.shopPricePending?.length || journal?.shopOperationPending) || this.status.state === 'queued', lastSuccess: journal?.lastSuccess ?? null };
   }
   private emit(patch: Partial<CloudStatus> = {}): CloudStatus { this.status = { ...this.status, ...patch }; const current = this.snapshot(); this.host.emit(current); return current; }
   control<T>(task: () => Promise<T>): Promise<T> {
@@ -40,7 +42,7 @@ export class CloudController {
   }
   private makeEngine(journal: SyncJournal): SyncEngine {
     return new SyncEngine(journal, {
-      server: ADMIN_ORIGIN, read: filePath => this.host.read(filePath), change: this.host.change,
+      server: ADMIN_ORIGIN, read: filePath => this.host.read(filePath), change: this.host.change, backupRemote: this.host.backupRemote,
       save: value => this.journals.save(value),
       shopPrices: {
         stock: id => this.client.stock('GET', id),
@@ -52,6 +54,11 @@ export class CloudController {
         const account = this.client.requireAccount();
         if (account.id !== journal.accountId) throw new CloudError('账号已改变，原账号的待发内容已保留。', 401);
         return this.client.stock(method, id, body);
+      },
+      shopOperation: (id, body) => {
+        const account = this.client.requireShopOperationAccount();
+        if (account.id !== journal.accountId) throw new CloudError('账号已改变，原账号的待发内容已保留。', 401);
+        return this.client.stockOperation(id, body);
       },
       report: (state, message, _journal, payloadBytes) => this.emit({ state, message, payloadBytes })
     });
@@ -116,13 +123,15 @@ export class CloudController {
     return this.snapshot();
   }
   async download(id: string): Promise<InventoryDocument> {
+    this.engine?.requireNoShopOperation();
     await this.pause(); const account = this.client.requireAccount();
+    this.engine?.requireNoShopOperation();
     try {
       this.emit({ state: 'downloading', message: '正在获取所选云端库存…' });
       const record = await this.client.stock('GET', id);
       const document = await this.host.download(record);
       if (document.inventory?.inventoryId !== id || !document.filePath) { await this.selectCurrent(); return document; }
-      const journal: SyncJournal = { accountId: account.id, filePath: document.filePath, inventoryId: id, version: record.version, baseHash: inventoryHash(record.inventory), pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes, lastSuccess: new Date().toISOString() };
+      const journal: SyncJournal = { accountId: account.id, filePath: document.filePath, inventoryId: id, version: record.version, baseHash: inventoryHash(record.inventory), pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes, shopOperationsSupported: record.shopOperationsSupported === true, lastSuccess: new Date().toISOString() };
       await this.journals.save(journal);
       this.engine = this.makeEngine(journal);
       this.emit({ state: 'synced', message: '云端库存已保存为本地文件并连接。' });
@@ -139,12 +148,24 @@ export class CloudController {
     }
     await this.selectCurrent();
   }
-  async resolve(choice: 'use-cloud' | 'upload-new'): Promise<InventoryDocument> {
+  async resolve(choice: 'use-cloud' | 'use-local' | 'upload-new'): Promise<InventoryDocument> {
+    this.engine?.requireNoShopOperation();
     if (!this.engine || !this.engine.journal.conflict) throw new CloudError('此库存没有待处理的同步冲突。', 400);
+    if (!['use-cloud', 'use-local', 'upload-new'].includes(choice)) throw new CloudError('无效的冲突处理方式。', 400);
     await this.pause();
+    this.engine.requireNoShopOperation();
     if (choice === 'use-cloud') {
       try { await this.engine.useCloud(); this.schedule(30000); }
       catch (error) { this.emit({ state: 'conflict', message: '未替换本地内容，请检查错误后重新选择。' }); throw error; }
+    }
+    else if (choice === 'use-local') {
+      try {
+        await this.engine.useLocal();
+        if (!this.engine.journal.conflict) this.schedule(30000);
+      } catch (error) {
+        this.emit({ state: 'conflict', message: '覆盖未完成，两端内容与原待发记录已保留。请检查错误后重新选择。' });
+        throw error;
+      }
     }
     else if (choice === 'upload-new') {
       const old = this.engine.journal;
@@ -164,5 +185,39 @@ export class CloudController {
     await this.engine.resolveShopPrices(choice);
     this.schedule(0);
     return this.host.current();
+  }
+
+  async shopOperation(input: ShopOperation): Promise<InventoryDocument> {
+    const operation = checkedShopOperation(input);
+    const engine = this.engine;
+    const requireBinding = (): InventoryFile => {
+      const account = this.client.requireShopOperationAccount(), current = this.host.current();
+      if (!engine || this.engine !== engine || engine.journal.accountId !== account.id || !current.filePath || !current.inventory ||
+          !samePath(current.filePath, engine.journal.filePath) || current.inventory.inventoryId !== engine.journal.inventoryId) {
+        throw new CloudError('请先登录并连接当前库存，再保存商店操作。', 400);
+      }
+      return current.inventory;
+    };
+    const fields = captureShopOperation(requireBinding(), operation);
+    engine!.requireNoShopOperation();
+    await this.pause();
+    try {
+      requireBinding();
+      engine!.requireNoShopOperation();
+      if (engine!.journal.conflict || engine!.journal.shopPriceConflict) throw new CloudError('请先处理库存或商店价格冲突，再保存商店操作。', 409);
+      engine!.resume();
+      await engine!.run();
+      await engine!.pause();
+      requireBinding();
+      if (this.status.state !== 'synced' || engine!.journal.pending || engine!.journal.shopPricePending?.length || engine!.journal.conflict ||
+          engine!.journal.shopPriceConflict || engine!.journal.shopOperationPending) throw new CloudError('请先完成库存和商店价格同步，再保存商店操作。', 409);
+      await engine!.shopOperation(operation, fields);
+      return this.host.current();
+    } finally {
+      if (this.engine === engine) {
+        engine?.resume();
+        this.schedule(30000);
+      }
+    }
   }
 }

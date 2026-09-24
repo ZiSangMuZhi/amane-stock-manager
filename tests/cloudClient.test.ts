@@ -13,6 +13,7 @@ const content = { name: '保留商店名称', imageId: null, currency: 'CAD' as 
 const product: ShopProduct = { id, version: 3, sourceBookId, sourceBarcode: '001234', shopRegistered: true, deletedAt: null, content, listed: true, stock: 2 };
 const body = JSON.stringify({ requestKey, content, version: 3 }, null, 2) + '\n';
 const response = (value: unknown, status = 200, extra: Record<string, string> = {}) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', ...extra } });
+const operationBody = JSON.stringify({ version: 3, requestKey, operation: { type: 'shop-listing-batch', barcodes: ['123456'], listed: true } }, null, 2) + '\n';
 function fixture(transport: typeof fetch = async url => response(String(url).endsWith('/api/products') ? { items: [product] } : product), saved: unknown = null) {
   const vault = { available: true, load: vi.fn(async () => saved === null ? null : typeof saved === 'string' ? saved : JSON.stringify(saved)), save: vi.fn(async (_value: string) => undefined), clear: vi.fn(async () => undefined) };
   const requests: { url: string; options: RequestInit }[] = [];
@@ -20,6 +21,69 @@ function fixture(transport: typeof fetch = async url => response(String(url).end
   client.account = structuredClone(account);
   return { client, vault, requests };
 }
+
+describe('fixed stock shop-operation transport', () => {
+  const inventory = { ...createInventory('Synthetic'), inventoryId: sourceBookId };
+  const record = { id: sourceBookId, version: 4, inventory, updatedAt: inventory.updatedAt, shopOperationsSupported: true };
+  it('sends the durable body exactly to the fixed route with administrator Origin and CSRF', async () => {
+    const h = fixture(async url => response(String(url).endsWith('/session') ? { account } : record), { origin: ADMIN_ORIGIN, cookies });
+    await h.client.restore();
+    expect(await h.client.stockOperation(sourceBookId, operationBody)).toMatchObject(record);
+    expect(h.requests[1]).toMatchObject({ url: `${ADMIN_ORIGIN}/api/stock-books/${sourceBookId}/operations`, options: {
+      method: 'POST', body: operationBody, redirect: 'error', headers: { Origin: ADMIN_REQUEST_ORIGIN, 'X-CSRF-Token': 'synthetic-csrf' }
+    } });
+  });
+  it('accepts 200 maximum-length Unicode barcodes without changing the durable bytes', async () => {
+    const h = fixture(async () => response(record));
+    const barcodes = Array.from({ length: 200 }, (_, index) => '商'.repeat(125) + String(index).padStart(3, '0'));
+    const wire = JSON.stringify({ version: 3, requestKey, operation: { type: 'shop-listing-batch', barcodes, listed: true } });
+    expect(Buffer.byteLength(wire)).toBeGreaterThan(64 * 1024);
+    await h.client.stockOperation(sourceBookId, wire);
+    expect(h.requests).toHaveLength(1); expect(h.requests[0]!.options.body).toBe(wire);
+  });
+  it('enforces the server operation body limit before any request', async () => {
+    const h = fixture();
+    await expect(h.client.stockOperation(sourceBookId, operationBody + ' '.repeat(2 * 1024 * 1024))).rejects.toMatchObject({ status: 400, definitiveRejection: true });
+    expect(h.requests).toHaveLength(0);
+  });
+  it.each([['inventory.manage', 'products.manage'], ['content.manage']])('permits inventory/product aliases without pricing: %j', async (...permissions) => {
+    const h = fixture(async () => response(record)); h.client.account!.permissions = permissions;
+    await h.client.stockOperation(sourceBookId, operationBody); expect(h.requests).toHaveLength(1);
+  });
+  it.each([[], ['inventory.manage'], ['products.manage'], ['pricing.manage'], ['inventory.manage', 'pricing.manage']])('requires both inventory and products: %j', async (...permissions) => {
+    const h = fixture(async () => response(record)); h.client.account!.permissions = permissions;
+    await expect(h.client.stockOperation(sourceBookId, operationBody)).rejects.toMatchObject({ status: 403 }); expect(h.requests).toHaveLength(0);
+  });
+  it.each([
+    { type: 'shop-listing-batch', barcodes: [], listed: true },
+    { type: 'shop-listing-batch', barcodes: ['a', 'a'], listed: true },
+    { type: 'shop-listing-batch', barcodes: Array.from({ length: 201 }, (_, i) => String(i)), listed: true },
+    { type: 'shop-listing-batch', barcodes: [' a '], listed: true },
+    { type: 'shop-listing-batch', barcodes: ['__proto__'], listed: true },
+    { type: 'shop-listing-batch', barcodes: ['a'], listed: 'true' },
+    { type: 'shop-image', barcode: 'a', imageId: '../bad' },
+    { type: 'shop-image', barcode: 'a', imageId: null, url: 'https://evil.invalid' },
+    { type: 'unknown', barcode: 'a', imageId: null }
+  ])('rejects malformed operations before transmission %#', async operation => {
+    const h = fixture(); await expect(h.client.stockOperation(sourceBookId, JSON.stringify({ version: 3, requestKey, operation }))).rejects.toMatchObject({ status: 400 });
+    expect(h.requests).toHaveLength(0);
+  });
+  it.each([404, 410])('never treats operation route HTTP %i as stock disappearance', async status => {
+    const h = fixture(async () => response({ error: 'STOCK_REQUEST_FAILED' }, status));
+    await expect(h.client.stockOperation(sourceBookId, operationBody)).rejects.toMatchObject({ status, inventoryMissing: false });
+  });
+  it('preserves fixed verification diagnostics without leaking a service body', async () => {
+    const h = fixture(async () => response({ error: 'REQUEST_VERIFICATION_FAILED', message: 'synthetic-secret' }, 403));
+    await expect(h.client.stockOperation(sourceBookId, operationBody)).rejects.toMatchObject({ status: 403, message: expect.stringContaining('写入来源或会话校验') });
+  });
+  it('rejects redirected metadata responses and never retries', async () => {
+    const h = fixture(async () => new Response('', { status: 302, headers: { Location: 'https://evil.invalid' } }));
+    await expect(h.client.stockOperation(sourceBookId, operationBody)).rejects.toMatchObject({ status: 502 }); expect(h.requests).toHaveLength(1);
+  });
+  it.each(['../other', `${sourceBookId}/operations`, 'https://evil.invalid'])('rejects arbitrary operation paths %s', async invalid => {
+    const h = fixture(); await expect(h.client.stockOperation(invalid, operationBody)).rejects.toMatchObject({ status: 400 }); expect(h.requests).toHaveLength(0);
+  });
+});
 
 describe('API host and persisted session isolation', () => {
   it('pins the production API host and a separate encrypted session filename', () => {

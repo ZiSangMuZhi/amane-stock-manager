@@ -22,6 +22,7 @@ import { CurrencyCode, ExportFormat, InventoryDocument, InventoryFile, ProductLo
 import {
   createInventoryFile,
   backupInventoryFile,
+  backupCloudInventory,
   normalizeJsonPath,
   readInventoryFile,
   readSettings,
@@ -472,8 +473,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('cloud:connect', () => cloud.control(() => cloud.connect()));
   ipcMain.handle('cloud:download', (_event, id: string) => cloud.control(() => cloud.download(id)));
   ipcMain.handle('cloud:retry', () => cloud.control(() => cloud.retry()));
-  ipcMain.handle('cloud:resolve', (_event, choice: 'use-cloud' | 'upload-new') => cloud.control(() => cloud.resolve(choice)));
+  ipcMain.handle('cloud:resolve', (_event, choice: 'use-cloud' | 'use-local' | 'upload-new') => cloud.control(() => cloud.resolve(choice)));
   ipcMain.handle('cloud:resolve-shop-prices', (_event, choice: 'retry-local' | 'keep-shop') => cloud.control(() => cloud.resolveShopPrices(choice)));
+  ipcMain.handle('cloud:shop-operation', (_event, operation: import('../shared/types').ShopOperation) => cloud.control(() => cloud.shopOperation(operation)));
+  ipcMain.handle('cloud:upload-image-asset', (_event, dataUrl: string, crop: { x: number; y: number; width: number; height: number }) => cloud.control(() => cloud.client.uploadImage(dataUrl, crop)));
   ipcMain.handle('inventory:listing', (_event, barcode: string, listed: boolean) => queueInventoryWrite(async () => {
     currentInventory = updateListing(requireInventory(), barcode, listed); await saveCurrentInventory(); return currentDocument();
   }));
@@ -522,6 +525,11 @@ function createCloudController(): CloudController {
   return new CloudController(new CloudClient(vault), new JournalStore(path.join(directory, 'stock-sync-journal.json')), {
     current: currentDocument, read: filePath => queueInventoryWrite(() => readInventoryForPath(filePath)),
     emit: status => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status-changed', status); },
+    backupRemote: (filePath, record) => queueInventoryWrite(async () => {
+      const local = await readInventoryForPath(filePath);
+      if (!local || local.inventoryId !== record.id) throw new Error('库存文件与同步绑定不一致，已停止覆盖。');
+      await backupCloudInventory(filePath, record);
+    }),
     change: (filePath, inventoryId, update, backup) => queueInventoryWrite(async () => {
       const local = await readInventoryForPath(filePath);
       if (!local || local.inventoryId !== inventoryId) throw new Error('库存文件与同步绑定不一致，已停止写入。');

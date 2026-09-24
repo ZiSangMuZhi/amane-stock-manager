@@ -9,6 +9,7 @@ import {
   LookupStatus,
   SCHEMA_VERSION
 } from '../shared/types';
+import type { StockRecord } from '../shared/types';
 
 const lookupStatuses: LookupStatus[] = ['idle', 'loading', 'found', 'not_found', 'error'];
 const currencyCodes: InventoryItem['priceCurrency'][] = ['CAD', 'JPY', 'USD', 'CNY', 'EUR', 'GBP', 'TWD', 'HKD'];
@@ -156,6 +157,21 @@ export async function backupInventoryFile(filePath: string): Promise<string> {
   const bytes = await fs.readFile(filePath);
   const tempPath = `${backupPath}.tmp`;
   await fs.writeFile(tempPath, bytes, { flag: 'wx' });
+  await fs.rename(tempPath, backupPath);
+  return backupPath;
+}
+
+/** A standalone, reopenable cloud copy. Never changes the current local inventory. */
+export async function backupCloudInventory(filePath: string, record: StockRecord): Promise<string> {
+  if (!Number.isSafeInteger(record.version) || record.version < 1 || record.id !== record.inventory.inventoryId) {
+    throw new Error('云端库存备份版本或标识无效，已停止覆盖。');
+  }
+  const backupPath = `${filePath}.cloud-v${record.version}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}.json`;
+  const { cloudLink: _link, ...inventory } = record.inventory;
+  const tempPath = `${backupPath}.tmp`;
+  const file = await fs.open(tempPath, 'wx', 0o600);
+  try { await file.writeFile(`${JSON.stringify(inventory, null, 2)}\n`, 'utf8'); await file.sync(); }
+  finally { await file.close(); }
   await fs.rename(tempPath, backupPath);
   return backupPath;
 }

@@ -1,12 +1,47 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { InventoryFile, StockRecord } from '../shared/types';
+import { InventoryFile, ShopOperation, StockRecord } from '../shared/types';
 import { validateStockSnapshot } from './stockPreflight';
 import { checkpointShopPrices, flushShopPrices, prepareShopPrices, readShopPriceResolution, sameShopPrice,
   ShopPriceSyncError, type ShopPriceIntent, type ShopPriceCandidate, type ShopPriceTransport } from './shopPriceSync';
 
 export class CloudError extends Error {
   constructor(message: string, readonly status = 0, readonly definitiveRejection = false, readonly inventoryMissing = false) { super(message); }
+}
+
+export function checkedShopOperation(value: unknown): ShopOperation {
+  const barcode = (input: unknown): input is string => typeof input === 'string' && input.length > 0 && input.length <= 128 &&
+    input === input.trim() && !/[\u0000-\u001f\u007f]/.test(input) && !['__proto__', 'constructor', 'prototype'].includes(input);
+  const invalid = (): never => { throw new CloudError('商店操作内容无效，请重新选择商品。', 400, true); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid();
+  const op = value as Record<string, unknown>;
+  if (op.type === 'shop-listing-batch' && Object.keys(op).every(key => ['type', 'barcodes', 'listed'].includes(key)) &&
+      Array.isArray(op.barcodes) && op.barcodes.length > 0 && op.barcodes.length <= 200 && op.barcodes.every(barcode) &&
+      new Set(op.barcodes).size === op.barcodes.length && typeof op.listed === 'boolean') return structuredClone(op) as ShopOperation;
+  if (op.type === 'shop-image' && Object.keys(op).every(key => ['type', 'barcode', 'imageId'].includes(key)) && barcode(op.barcode) &&
+      (op.imageId === null || typeof op.imageId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(op.imageId))) return structuredClone(op) as ShopOperation;
+  return invalid();
+}
+
+export interface ShopOperationField { barcode: string; createdAt: string; value: boolean | string | null }
+export function captureShopOperation(inventory: InventoryFile, operation: ShopOperation): ShopOperationField[] {
+  return (operation.type === 'shop-listing-batch' ? operation.barcodes : [operation.barcode]).map(barcode => {
+    const item = inventory.items[barcode];
+    if (!item) throw new CloudError('所选商品已改变，请核对后再次保存。', 400);
+    return { barcode, createdAt: item.createdAt, value: operation.type === 'shop-image' ? item.shop.imageId : item.listed };
+  });
+}
+export function sameShopOperationFields(a: ShopOperationField[], b: ShopOperationField[]): boolean {
+  return a.length === b.length && a.every((field, i) => field.barcode === b[i]?.barcode && field.createdAt === b[i]?.createdAt && field.value === b[i]?.value);
+}
+
+export interface PendingShopOperation {
+  body: string;
+  requestKey: string;
+  version: number;
+  baseHash: string;
+  createdAt: string;
+  fields: ShopOperationField[];
 }
 
 export function canonicalSnapshot(inventory: InventoryFile): InventoryFile {
@@ -32,6 +67,8 @@ export interface PendingSnapshot {
   body: string;
   shopPrices?: ShopPriceIntent[];
   shopPriceCandidates?: ShopPriceCandidate[];
+  /** Explicit conflict resolution may replace this ID only; disappearance must never create another book. */
+  overwrite?: true;
 }
 
 export interface SyncJournal {
@@ -46,6 +83,8 @@ export interface SyncJournal {
   registeredBarcodes?: string[];
   shopPricePending?: ShopPriceIntent[];
   shopPriceConflict?: boolean;
+  shopOperationPending?: PendingShopOperation;
+  shopOperationsSupported?: boolean;
   /** Write-ahead binding change: either ID may be on disk until the replacement is committed. */
   replacement?: { inventoryId: string };
 }
@@ -54,6 +93,8 @@ export interface SyncAdapter {
   read(filePath: string): Promise<InventoryFile | null>;
   change(filePath: string, inventoryId: string, update: (current: InventoryFile) => InventoryFile, backup?: boolean): Promise<void>;
   save(journal: SyncJournal): Promise<void>;
+  backupRemote?(filePath: string, record: StockRecord): Promise<void>;
+  shopOperation?(inventoryId: string, body: string): Promise<StockRecord>;
   request(method: 'GET' | 'POST' | 'PUT', inventoryId: string, body?: string): Promise<StockRecord>;
   report(state: 'queued' | 'uploading' | 'downloading' | 'synced' | 'offline' | 'error' | 'expired' | 'conflict', message: string, journal: SyncJournal, bytes?: number): void;
   server: string;
@@ -66,6 +107,7 @@ export function samePath(a: string, b: string): boolean { return path.resolve(a)
 export class SyncEngine {
   private flight: Promise<void> | null = null;
   private paused = false;
+  private operationFailure: CloudError | null = null;
   constructor(readonly journal: SyncJournal, private readonly adapter: SyncAdapter) {}
 
   async pause(): Promise<void> { this.paused = true; await this.flight; }
@@ -90,6 +132,15 @@ export class SyncEngine {
           .catch(() => this.report('error', '两端版本不同，冲突状态保存失败，请检查本地磁盘。'));
       }
       if (error instanceof CloudError && error.definitiveRejection && [400, 413].includes(error.status)) {
+        if (this.journal.pending?.overwrite) {
+          // A rejected explicit overwrite needs a new choice and backup, never an ordinary replacement request.
+          return checkpointShopPrices(this.journal, { ...this.journal, conflict: true }, value => this.adapter.save(value))
+            .then(() => this.report('conflict', `${error.message} 覆盖未完成，请修正本地资料后重新选择处理方式。`))
+            .catch(() => {
+              this.journal.conflict = true;
+              this.report('error', '覆盖请求被拒绝且冲突状态保存失败，原请求已保留，请检查本地磁盘。');
+            });
+        }
         // Definitive validation rejection cannot have committed a stock mutation. Corrected local input may use a fresh key.
         this.journal.pending = null;
         return this.adapter.save(this.journal).then(() => this.report('error', `${error.message} 请修正本地资料后重试。`));
@@ -131,7 +182,7 @@ export class SyncEngine {
     const prepared = [...shopPrices, ...candidates.filter(candidate => registered.has(candidate.barcode)).map(candidate => ({ ...candidate, productId: '' }))];
     // Stock acknowledgement and handoff to the product queue are one durable commit.
     await checkpointShopPrices(this.journal, { ...this.journal, version: record.version, baseHash,
-      pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes,
+      pending: null, conflict: false, registeredBarcodes: record.shopRegisteredBarcodes, shopOperationsSupported: record.shopOperationsSupported === true,
       shopPricePending: [...(this.journal.shopPricePending ?? []), ...prepared],
       lastSuccess: prepared.length ? this.journal.lastSuccess : new Date().toISOString()
     }, value => this.adapter.save(value));
@@ -157,7 +208,7 @@ export class SyncEngine {
       }, true);
     }
     const next: SyncJournal = { ...this.journal, inventoryId: nextId, version: 0, baseHash: '', pending: null,
-      conflict: false, lastSuccess: null, shopPricePending: [], shopPriceConflict: false, registeredBarcodes: undefined };
+      conflict: false, lastSuccess: null, shopPricePending: [], shopPriceConflict: false, registeredBarcodes: undefined, shopOperationsSupported: false };
     delete next.replacement;
     // JournalStore also removes the old binding identified by its durable replacement intent.
     await this.adapter.save(next);
@@ -166,6 +217,10 @@ export class SyncEngine {
   }
 
   private async work(): Promise<void> {
+    // Metadata requests have their own idempotency record. They never enter stock recreation or conflict rebasing.
+    if (this.journal.shopOperationPending && !await this.flushShopOperation()) return;
+    if (this.paused) return;
+    const overwrite = this.journal.pending?.overwrite === true;
     let recreated = Boolean(this.journal.replacement);
     if (this.journal.replacement) await this.replaceMissingInventory();
     if (this.journal.conflict) { this.report('conflict', '同步冲突待处理，两端副本已保留。'); return; }
@@ -173,6 +228,9 @@ export class SyncEngine {
       try { return await this.adapter.request(method, this.journal.inventoryId, body); }
       catch (error) {
         let missing = error instanceof CloudError && error.inventoryMissing;
+        if (missing && overwrite) {
+          throw new CloudError('云端库存已删除或绑定已改变，不能继续覆盖；未创建新库存，请重新选择处理方式。', 409);
+        }
         // A write's old idempotency key can be tombstoned even if somebody has
         // since recreated that ID. Verify current absence before allocating a new ID.
         // A fresh POST into a retained soft-deleted ID instead returns 409.
@@ -223,6 +281,7 @@ export class SyncEngine {
         if (inventoryHash(await this.local()) === this.journal.baseHash) {
           this.journal.lastSuccess = new Date().toISOString();
           this.journal.registeredBarcodes = record.shopRegisteredBarcodes;
+          this.journal.shopOperationsSupported = record.shopOperationsSupported === true;
           await this.adapter.save(this.journal);
           this.report('synced', '本地与云端已同步。');
           return;
@@ -277,9 +336,166 @@ export class SyncEngine {
     }
   }
 
+  requireNoShopOperation(): void {
+    if (this.journal.shopOperationPending) throw new CloudError('商店操作尚未确认，请先重试同步，不能丢弃待发操作。', 409);
+  }
+
+  async shopOperation(input: ShopOperation, expectedFields?: ShopOperationField[]): Promise<void> {
+    const operation = checkedShopOperation(input);
+    this.requireNoShopOperation();
+    await this.pause();
+    try {
+      this.requireNoShopOperation();
+      if (!this.adapter.shopOperation) throw new CloudError('此版本尚不支持商店操作。', 400);
+      if (!this.journal.shopOperationsSupported) throw new CloudError('服务端尚未支持此操作，请先升级 Mac 服务端；本地内容已保留。', 400);
+      if (this.journal.conflict || this.journal.pending || this.journal.replacement || this.journal.shopPricePending?.length ||
+          this.journal.shopPriceConflict || this.journal.version < 1) throw new CloudError('请先完成库存和商店价格同步，再保存商店操作。', 409);
+      const local = await this.local();
+      validateStockSnapshot(canonicalSnapshot(local));
+      const baseHash = inventoryHash(local);
+      if (baseHash !== this.journal.baseHash) throw new CloudError('本地库存已修改，请先完成同步后再次保存。', 409);
+      const fields = captureShopOperation(local, operation);
+      if (expectedFields && !sameShopOperationFields(fields, expectedFields)) throw new CloudError('云端商品已更新，请核对后再次保存。', 409);
+      const requestKey = randomUUID(), version = this.journal.version;
+      const next: SyncJournal = { ...this.journal, shopOperationPending: { requestKey, version, baseHash, fields,
+        createdAt: new Date().toISOString(), body: JSON.stringify({ version, requestKey, operation }) } };
+      await checkpointShopPrices(this.journal, next, value => this.adapter.save(value));
+    } finally { this.resume(); }
+    this.operationFailure = null;
+    await this.run();
+    if (this.operationFailure) throw this.operationFailure;
+    if (this.journal.shopOperationPending) throw new CloudError('商店操作尚未确认，原请求已保留，请重试同步。');
+  }
+
+  private async flushShopOperation(): Promise<boolean> {
+    const pending = this.journal.shopOperationPending!;
+    let rejected: CloudError | undefined;
+    try {
+      await this.local();
+      if (!this.adapter.shopOperation) throw new CloudError('此版本尚不支持恢复商店操作，原请求已保留。');
+      const payload = JSON.parse(pending.body) as { version: number; requestKey: string; operation: unknown };
+      const operation = checkedShopOperation(payload.operation);
+      if (payload.version !== pending.version || payload.requestKey !== pending.requestKey || pending.fields.length !==
+          (operation.type === 'shop-image' ? 1 : operation.barcodes.length) || pending.fields.some((field, i) =>
+            field.barcode !== (operation.type === 'shop-image' ? operation.barcode : operation.barcodes[i]))) throw new Error('Invalid operation journal');
+      // Persist exact bytes before every retry, including recovery after a failed acknowledgement.
+      await this.adapter.save(this.journal);
+      if (this.paused) return false;
+      this.report('uploading', '正在保存商店上架或图片设置…', Buffer.byteLength(pending.body));
+      let record: StockRecord;
+      try { record = await this.adapter.shopOperation(this.journal.inventoryId, pending.body); }
+      catch (error) {
+        if (error instanceof CloudError && ([403, 404, 405, 409, 410, 422, 428].includes(error.status) ||
+            error.definitiveRejection && [400, 413].includes(error.status))) rejected = error;
+        throw error;
+      }
+      this.validateRecord(record);
+      validateStockSnapshot(canonicalSnapshot(record.inventory));
+      if (record.version <= pending.version) throw new CloudError('商店操作响应版本无效，原请求已保留。', 502);
+      const desired = operation.type === 'shop-image' ? operation.imageId : operation.listed;
+      if (pending.fields.some(field => {
+        const item = record.inventory.items[field.barcode];
+        return !item || item.createdAt !== field.createdAt || (operation.type === 'shop-image' ? item.shop.imageId : item.listed) !== desired;
+      })) throw new CloudError('商店操作响应内容无效，原请求已保留。', 502);
+      const baseHash = inventoryHash(record.inventory);
+      const link = { server: this.adapter.server, accountId: this.journal.accountId, version: record.version, baseHash };
+      await this.adapter.change(this.journal.filePath, this.journal.inventoryId, current => {
+        if (inventoryHash(current) === pending.baseHash) return { ...canonicalSnapshot(record.inventory), cloudLink: link };
+        const inventory = structuredClone(current);
+        for (const field of pending.fields) {
+          const item = inventory.items[field.barcode];
+          if (!item || item.createdAt !== field.createdAt) continue;
+          // Only this operation's field may merge into concurrent edits; a replay never restores an old field.
+          if (operation.type === 'shop-image') {
+            if (item.shop.imageId === field.value) item.shop.imageId = operation.imageId;
+          } else if (item.listed === field.value) item.listed = operation.listed;
+        }
+        return { ...inventory, cloudLink: link };
+      });
+      const next = { ...this.journal, version: record.version, baseHash, registeredBarcodes: record.shopRegisteredBarcodes, shopOperationsSupported: record.shopOperationsSupported === true,
+        lastSuccess: new Date().toISOString() };
+      delete next.shopOperationPending;
+      await checkpointShopPrices(this.journal, next, value => this.adapter.save(value));
+      // Object.assign does not delete optional properties omitted by the checkpoint.
+      delete this.journal.shopOperationPending;
+      this.operationFailure = null;
+      return true;
+    } catch (error) {
+      const status = error instanceof CloudError ? error.status : 0;
+      let message = status === 409 ? '云端商品已更新，请先同步并核对后再次保存。'
+        : status === 403 ? (error instanceof CloudError && error.message.startsWith('服务器拒绝了写入来源或会话校验')
+          ? '服务器拒绝了写入来源或会话校验，请更新应用并重新登录后再保存。' : '此账号没有所需的库存或商店商品管理权限，请联系管理员授权。')
+        : status === 401 ? '登录已失效，商店操作原请求已保留，请重新登录后重试同步。'
+        : rejected ? `服务器拒绝商店操作（HTTP ${status}），请检查商品和服务版本后再次保存。`
+        : '商店操作尚未确认，原请求已保留，请检查网络或本地文件后重试同步。';
+      if (rejected) {
+        try {
+          const next = { ...this.journal };
+          delete next.shopOperationPending;
+          await checkpointShopPrices(this.journal, next, value => this.adapter.save(value));
+          delete this.journal.shopOperationPending;
+        } catch { message += ' 待发状态保存失败，原请求仍保留，请检查本地磁盘。'; }
+      }
+      this.operationFailure = new CloudError(message, status);
+      this.report(status === 401 ? 'expired' : status > 0 || rejected ? 'error' : 'offline', message);
+      return false;
+    }
+  }
+
+  async useLocal(): Promise<void> {
+    const requireChoice = (): void => {
+      this.requireNoShopOperation();
+      if (!this.journal.conflict) throw new CloudError('此库存没有待处理的同步冲突。', 400);
+      if (this.journal.shopPricePending?.length || this.journal.shopPriceConflict) {
+        throw new ShopPriceSyncError('请先处理待同步或冲突的商店价格，再选择覆盖云端库存。', 409, true);
+      }
+      if (this.journal.replacement) throw new CloudError('库存正在恢复新的云端绑定，不能覆盖原库存。', 409);
+    };
+    requireChoice();
+    await this.pause();
+    try {
+      requireChoice();
+      if (!this.adapter.backupRemote) throw new CloudError('当前环境无法备份云端副本，已停止覆盖。', 400);
+      const inventory = canonicalSnapshot(await this.local());
+      validateStockSnapshot(inventory);
+      const expectedHash = inventoryHash(inventory);
+      this.report('downloading', '正在读取最新云端版本并准备覆盖前备份…');
+      const record = await this.adapter.request('GET', this.journal.inventoryId);
+      this.validateRecord(record);
+      try { validateStockSnapshot(canonicalSnapshot(record.inventory)); }
+      catch { throw new CloudError('云端库存格式无效，已停止覆盖并保留本地内容。', 502); }
+      // Use the latest remote version and the normal managed-price rules, not the stale conflict snapshot.
+      const prepared = this.adapter.shopPrices
+        ? await prepareShopPrices(inventory, record.version, this.adapter.shopPrices)
+        : { intents: [], candidates: [] };
+      await this.adapter.backupRemote(this.journal.filePath, structuredClone(record));
+      if (inventoryHash(await this.local()) !== expectedHash) {
+        throw new CloudError('准备覆盖时本地文件已修改，云端未覆盖，请重新选择处理方式。', 409);
+      }
+      const requestKey = randomUUID();
+      const next: SyncJournal = { ...this.journal, version: record.version, baseHash: inventoryHash(record.inventory),
+        registeredBarcodes: record.shopRegisteredBarcodes, shopOperationsSupported: record.shopOperationsSupported === true, conflict: false,
+        pending: { method: 'PUT', requestKey, version: record.version, hash: expectedHash, overwrite: true,
+          body: JSON.stringify({ inventory, version: record.version, requestKey }),
+          shopPrices: prepared.intents, shopPriceCandidates: prepared.candidates }
+      };
+      // Preserve the old conflicting request until its backed-up replacement is durably committed.
+      await checkpointShopPrices(this.journal, next, value => this.adapter.save(value));
+    } catch (error) {
+      if (error instanceof CloudError && error.inventoryMissing) {
+        throw new CloudError('云端库存已删除或不存在，不能覆盖；未创建新库存，请重新选择处理方式。', 409);
+      }
+      throw error;
+    } finally { this.resume(); }
+    // Failed preparation exits above with the old conflict intact; it must never dispatch an overwrite.
+    await this.run();
+  }
+
   async useCloud(): Promise<void> {
+    this.requireNoShopOperation();
     if (this.journal.shopPricePending?.length) throw new ShopPriceSyncError('请先处理待同步的商店价格，再选择库存副本。', 409, true);
     await this.pause();
+    this.requireNoShopOperation();
     if (this.journal.shopPricePending?.length) {
       this.resume();
       throw new ShopPriceSyncError('请先处理待同步的商店价格，再选择库存副本。', 409, true);
@@ -296,9 +512,11 @@ export class SyncEngine {
   }
 
   async resolveShopPrices(choice: 'retry-local' | 'keep-shop'): Promise<void> {
+    this.requireNoShopOperation();
     if (!['retry-local', 'keep-shop'].includes(choice)) throw new Error('无效的价格处理方式。');
     await this.pause();
     try {
+      this.requireNoShopOperation();
       const pending = this.journal.shopPricePending ?? [];
       if (!pending.length) return;
       if (!this.adapter.shopPrices) throw new ShopPriceSyncError('商店价格同步尚不可用，待发价格已保留。');
